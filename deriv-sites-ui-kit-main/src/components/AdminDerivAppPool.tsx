@@ -133,10 +133,21 @@ const AdminDerivAppPool = () => {
   const addManualApp = () =>
     run("manual", async () => {
       if (!newAppId.trim()) throw new Error("Deriv App ID is required");
+      // Deriv's app_update only accepts alphanumerics, spaces, underscores and hyphens (max 48),
+      // so the name is tightened whenever the change is pushed to Deriv.
+      const rawName = newAppName.trim() || `DSites Pool ${formatMarkupRate(newAppMarkup)} Markup`;
+      const safeName = syncToDeriv
+        ? rawName
+            .replace(/deriv/gi, "DSites")
+            .replace(/[^a-zA-Z0-9 _-]/g, "")
+            .replace(/\s{2,}/g, " ")
+            .trim()
+            .slice(0, 48) || `DSites Pool ${formatMarkupRate(newAppMarkup)}`
+        : rawName;
       const result = await upsertPoolApp({
         appId: newAppId.trim(),
         oauthClientId: newAppId.trim(),
-        name: newAppName.trim() || `DSites Pool (${formatMarkupRate(newAppMarkup)} Markup)`,
+        name: safeName,
         markupPercentage: newAppMarkup,
         callbackUri,
         clientSecret: newAppSecret.trim() || undefined,
