@@ -1,25 +1,82 @@
 const { Pool } = require('pg');
 
-const pool = new Pool({
-    connectionString: process.env.DATABASE_URL,
-    ssl: {
-        rejectUnauthorized: false,
-    },
-});
+const useSupabaseRest = Boolean(
+    !process.env.DATABASE_URL && process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY
+);
 
-pool.on('error', err => {
-    console.error('[DB] Unexpected error on idle client', err);
-    if (!process.env.VERCEL) {
-        process.exit(-1);
+const pool = process.env.DATABASE_URL
+    ? new Pool({
+          connectionString: process.env.DATABASE_URL,
+          ssl: {
+              rejectUnauthorized: false,
+          },
+      })
+    : null;
+
+if (pool) {
+    pool.on('error', err => {
+        console.error('[DB] Unexpected error on idle client', err);
+        if (!process.env.VERCEL) {
+            process.exit(-1);
+        }
+    });
+}
+
+async function supabaseRest(table, { method = 'GET', query = '', body, prefer } = {}) {
+    const baseUrl = String(process.env.SUPABASE_URL || '').replace(/\/+$/, '');
+    const key = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '');
+    if (!baseUrl || !key) {
+        const err = new Error('Database is not configured (set DATABASE_URL or SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY)');
+        err.status = 503;
+        throw err;
     }
-});
+
+    const url = `${baseUrl}/rest/v1/${table}${query ? `?${query}` : ''}`;
+    const headers = {
+        apikey: key,
+        Authorization: `Bearer ${key}`,
+        'Content-Type': 'application/json',
+    };
+    if (prefer) {
+        headers.Prefer = prefer;
+    }
+
+    const response = await fetch(url, {
+        method,
+        headers,
+        body: body !== undefined ? JSON.stringify(body) : undefined,
+    });
+
+    if (!response.ok) {
+        const text = await response.text();
+        const err = new Error(`Supabase REST error (${response.status}): ${text}`);
+        err.status = response.status >= 500 ? 502 : 400;
+        throw err;
+    }
+
+    if (response.status === 204) {
+        return [];
+    }
+    const text = await response.text();
+    return text ? JSON.parse(text) : [];
+}
 
 let initPromise = null;
 
-// Initialize database tables
 async function initializeDatabase() {
+    if (useSupabaseRest) {
+        await supabaseRest('bot_ideas', { query: 'select=id&limit=1' });
+        console.log('[DB] Supabase REST connection verified.');
+        return;
+    }
+
+    if (!pool) {
+        const err = new Error('DATABASE_URL or SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY is required');
+        err.status = 503;
+        throw err;
+    }
+
     try {
-        // Bot Ideas table
         await pool.query(`
       CREATE TABLE IF NOT EXISTS bot_ideas (
         id SERIAL PRIMARY KEY,
@@ -40,7 +97,6 @@ async function initializeDatabase() {
       )
     `);
 
-        // Scanner signals table
         await pool.query(`
       CREATE TABLE IF NOT EXISTS scanner_signals (
         id SERIAL PRIMARY KEY,
@@ -64,7 +120,6 @@ async function initializeDatabase() {
       )
     `);
 
-        // Bot statistics table
         await pool.query(`
       CREATE TABLE IF NOT EXISTS bot_stats (
         id SERIAL PRIMARY KEY,
@@ -96,4 +151,10 @@ function ensureDatabaseInitialized() {
     return initPromise;
 }
 
-module.exports = { pool, initializeDatabase, ensureDatabaseInitialized };
+module.exports = {
+    pool,
+    useSupabaseRest,
+    supabaseRest,
+    initializeDatabase,
+    ensureDatabaseInitialized,
+};

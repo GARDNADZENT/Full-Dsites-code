@@ -1,13 +1,13 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "framework": "vite",
-  "installCommand": "cd .. && npm install --include=optional",
+  "installCommand": "cd .. && npm install --include=optional && npm install --no-save @swc/core-linux-x64-gnu@1.15.41",
   "buildCommand": "npm run build",
   "outputDirectory": "dist",
   "rewrites": [
     {
       "source": "/api/deriv-oauth-callback",
-      "destination": "https://tsidnkyizypwlxtkkoyd.supabase.co/functions/v1/deriv-oauth-callback"
+      "destination": "https://fanrhtqyjajhacrmrbfv.supabase.co/functions/v1/deriv-oauth-callback"
     },
     {
       "source": "/((?!api/|assets/|favicon\\.ico).*)",
