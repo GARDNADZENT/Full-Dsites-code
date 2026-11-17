@@ -218,7 +218,7 @@ const Settings = () => {
         </div>
         <p className="text-muted-foreground text-sm mb-4">Irreversible and destructive actions</p>
 
-        <Button variant="outline" className="border-red-500/30 text-red-500 hover:bg-red-500/10">
+        <Button variant="outline" className="border-red-500/40 text-red-400 hover:bg-red-500/15 hover:text-red-300">
           Delete Account
         </Button>
       </div>

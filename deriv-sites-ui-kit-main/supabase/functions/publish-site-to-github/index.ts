@@ -1,5 +1,4 @@
-import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.8";
+import { createClient } from "npm:@supabase/supabase-js@2";
 
 const correlationId = () => crypto.randomUUID();
 
@@ -282,7 +281,7 @@ const commitFiles = async (
   );
 };
 
-serve(async (req) => {
+Deno.serve(async (req) => {
   const requestId = correlationId();
   if (req.method === "OPTIONS")
     return new Response(null, { headers: corsHeaders });
@@ -616,6 +615,117 @@ serve(async (req) => {
     deploymentId = deployment.id;
     await admin.from("deployment_logs").insert({ organisation_id: site.organisation_id, site_id: siteId, deployment_id: deployment.id, level: "info", stage: "github_commit", message: "Publishing configuration to GitHub", provider: "github", metadata: { version, repository: `${owner}/${repo}`, path } });
 
+    const sharedProjectId = Deno.env.get("VERCEL_SHARED_PROJECT_ID")?.trim() || "";
+    const hasGitHubAppConfig = Boolean(
+      Deno.env.get("GITHUB_APP_ID")?.trim() &&
+      Deno.env.get("GITHUB_APP_PRIVATE_KEY")?.trim() &&
+      Deno.env.get("GITHUB_APP_INSTALLATION_ID")?.trim(),
+    );
+
+    // In shared Vercel multi-tenant mode, runtime configuration is served live
+    // from `site_publish_versions` via `public-site-config`. If GitHub App
+    // credentials have not been added yet, publish the snapshot directly so
+    // tenant sites can go live immediately without failing on GitHub commit.
+    if (sharedProjectId && !hasGitHubAppConfig) {
+      const branch =
+        integration.data?.github_default_branch ||
+        Deno.env.get("GITHUB_REPO_BRANCH")?.trim() ||
+        "main";
+      const domainVerified = Boolean(domain.data?.is_verified);
+      const liveUrl =
+        integration.data?.netlify_site_url ||
+        (domain.data?.hostname ? `https://${domain.data.hostname}` : null);
+      const snapshotStatus = domainVerified ? "deployed" : "committed";
+
+      await Promise.all([
+        admin
+          .from("site_publish_versions")
+          .update({ status: "published", published_at: generatedAt })
+          .eq("id", publishVersion.id),
+        admin
+          .from("site_deployments")
+          .update({
+            status: snapshotStatus,
+            repository_branch: branch,
+            ...(domainVerified && liveUrl ? { netlify_deploy_url: liveUrl } : {}),
+            completed_at: new Date().toISOString(),
+          })
+          .eq("id", deployment.id),
+        ...(configuration.data
+          ? [
+              admin
+                .from("site_configurations")
+                .update({
+                  status: "published",
+                  published_by: authData.user.id,
+                  published_at: generatedAt,
+                })
+                .eq("id", configuration.data.id),
+              admin
+                .from("sites")
+                .update({
+                  configuration_status: "published",
+                  active_configuration_version: configuration.data.version,
+                  active_template_version: configuration.data.template_version,
+                  ...(domainVerified ? { status: "active" } : {}),
+                })
+                .eq("id", siteId),
+            ]
+          : []),
+        ...(domainVerified
+          ? [
+              admin
+                .from("site_domains")
+                .update({ status: "active" })
+                .eq("site_id", siteId)
+                .eq("is_primary", true)
+                .eq("is_verified", true),
+            ]
+          : []),
+        admin.from("deployment_logs").insert({
+          organisation_id: site.organisation_id,
+          site_id: siteId,
+          deployment_id: deployment.id,
+          level: "info",
+          stage: "snapshot_published",
+          message: domainVerified
+            ? "Configuration snapshot published live to shared Vercel runtime"
+            : "Configuration snapshot published; attach/verify domain on Vercel to go live",
+          provider: "vercel",
+          metadata: {
+            version,
+            mode: "shared_snapshot",
+            githubCommitSkipped: true,
+            domainVerified,
+          },
+        }),
+      ]);
+
+      await audit({
+        organisationId: site.organisation_id,
+        siteId,
+        actorUserId: authData.user.id,
+        actorType: auditActorType,
+        action: "configuration.published",
+        provider: "vercel",
+        correlationId: requestId,
+        metadata: {
+          deploymentId: deployment.id,
+          version,
+          mode: "shared_snapshot",
+          domainVerified,
+        },
+      });
+
+      return jsonResponse({
+        deploymentId: deployment.id,
+        version,
+        status: snapshotStatus,
+        mode: "shared_snapshot",
+        liveUrl: domainVerified ? liveUrl : undefined,
+      });
+    }
+
     const token = await getInstallationToken();
     let branch =
       integration.data?.github_default_branch ||
@@ -681,7 +791,6 @@ serve(async (req) => {
       ],
     );
 
-    const sharedProjectId = Deno.env.get("VERCEL_SHARED_PROJECT_ID")?.trim() || "";
     const isInstantSharedDeploy =
       Boolean(sharedProjectId) &&
       integration.data?.status === "connected" &&

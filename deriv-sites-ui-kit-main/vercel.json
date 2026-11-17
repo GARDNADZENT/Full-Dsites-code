@@ -7,7 +7,7 @@
   "rewrites": [
     {
       "source": "/api/deriv-oauth-callback",
-      "destination": "https://dsites-backend.vercel.app/api/deriv-oauth-callback"
+      "destination": "https://fanrhtqyjajhacrmrbfv.supabase.co/functions/v1/deriv-oauth-callback"
     },
     {
       "source": "/((?!api/|assets/|favicon\\.ico).*)",

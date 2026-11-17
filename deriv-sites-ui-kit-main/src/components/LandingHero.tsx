@@ -27,7 +27,7 @@ const workflow = [
 
 const LandingHero = ({ onGetStarted }: LandingHeroProps) => {
   return (
-    <div className="flex-1 bg-slate-50 px-4 pb-12 text-slate-950 sm:px-6 lg:px-8">
+    <div className="light-surface flex-1 bg-slate-50 px-4 pb-12 text-slate-950 sm:px-6 lg:px-8">
       <section className="mx-auto max-w-6xl pt-8">
         <div className="flex flex-col gap-6 border-b border-slate-200 pb-8 lg:flex-row lg:items-end lg:justify-between">
           <div className="max-w-3xl">

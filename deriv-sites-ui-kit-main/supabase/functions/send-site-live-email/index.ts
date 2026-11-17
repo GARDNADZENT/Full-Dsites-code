@@ -1,8 +1,3 @@
-import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
-import { Resend } from "https://esm.sh/resend@2.0.0";
-
-const resend = new Resend(Deno.env.get("RESEND_API_KEY"));
-
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
@@ -18,17 +13,34 @@ const handler = async (req: Request): Promise<Response> => {
   if (req.method === "OPTIONS") {
     return new Response(null, { headers: corsHeaders });
   }
+  if (req.method !== "POST") {
+    return new Response(JSON.stringify({ error: "Method not allowed" }), {
+      status: 405,
+      headers: { "Content-Type": "application/json", ...corsHeaders },
+    });
+  }
 
   try {
+    const RESEND_API_KEY = Deno.env.get("RESEND_API_KEY");
+    if (!RESEND_API_KEY) {
+      throw new Error("RESEND_API_KEY is not configured");
+    }
+
     const { email, siteName, domainName }: SiteLiveEmailRequest = await req.json();
 
     console.log(`Sending site live notification to ${email} for domain ${domainName}`);
 
-    const emailResponse = await resend.emails.send({
-      from: "DerivSites <onboarding@resend.dev>",
-      to: [email],
-      subject: "🎉 Your DerivSites is Now Live!",
-      html: `
+    const res = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+      },
+      body: JSON.stringify({
+        from: "DerivSites <onboarding@resend.dev>",
+        to: [email],
+        subject: "🎉 Your DerivSites is Now Live!",
+        html: `
         <!DOCTYPE html>
         <html>
         <head>
@@ -97,7 +109,13 @@ const handler = async (req: Request): Promise<Response> => {
         </body>
         </html>
       `,
+      }),
     });
+
+    const emailResponse = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      throw new Error(emailResponse?.message || "Failed to send email");
+    }
 
     console.log("Site live email sent successfully:", emailResponse);
 
@@ -115,4 +133,4 @@ const handler = async (req: Request): Promise<Response> => {
   }
 };
 
-serve(handler);
+Deno.serve(handler);
