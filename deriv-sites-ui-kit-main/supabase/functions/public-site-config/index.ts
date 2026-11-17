@@ -278,7 +278,7 @@ Deno.serve(async req => {
 
     const { data: site, error: siteError } = await supabaseAdmin
       .from("sites")
-      .select("id, name, status, organisation_id, active_template_version")
+      .select("id, name, status, organisation_id, active_template_version, deriv_mode, platform_deriv_app_id, requested_markup_rate")
       .eq("id", domainRecord.site_id)
       .eq("status", "active")
       .maybeSingle();
@@ -290,6 +290,44 @@ Deno.serve(async req => {
 
     if (!site) {
       return json({ error: "Active site not found for hostname" }, 404);
+    }
+
+    // Dynamically resolve superuser pool app for platform_managed sites so newly generated
+    // or rotated v2 DevHub App IDs propagate live to every tenant without re-publishing.
+    let livePoolApp: {
+      app_id: string;
+      oauth_client_id: string;
+      environment: string;
+      markup_percentage: number;
+      configured_scopes: string[];
+    } | null = null;
+
+    if (site.deriv_mode !== "custom") {
+      if (site.platform_deriv_app_id) {
+        const { data: assignedPoolApp } = await supabaseAdmin
+          .from("platform_deriv_apps")
+          .select("app_id, oauth_client_id, environment, markup_percentage, configured_scopes")
+          .eq("id", site.platform_deriv_app_id)
+          .eq("is_active", true)
+          .maybeSingle();
+        livePoolApp = assignedPoolApp;
+      }
+      if (!livePoolApp) {
+        const { data: poolCandidates } = await supabaseAdmin
+          .from("platform_deriv_apps")
+          .select("app_id, oauth_client_id, environment, markup_percentage, configured_scopes, is_default")
+          .eq("is_active", true)
+          .eq("environment", "production");
+        if (poolCandidates?.length) {
+          const desired = Number(site.requested_markup_rate ?? 2.5);
+          poolCandidates.sort((a, b) => {
+            const diff = Math.abs(Number(a.markup_percentage) - desired) - Math.abs(Number(b.markup_percentage) - desired);
+            if (diff !== 0) return diff;
+            return (b.is_default ? 1 : 0) - (a.is_default ? 1 : 0);
+          });
+          livePoolApp = poolCandidates[0];
+        }
+      }
     }
 
     const { data: latestPublishedSnapshot, error: snapshotError } = await supabaseAdmin
@@ -315,6 +353,25 @@ Deno.serve(async req => {
     );
 
     if (snapshotResponse) {
+      if (livePoolApp) {
+        const existingDeriv =
+          snapshotResponse.deriv && typeof snapshotResponse.deriv === "object"
+            ? (snapshotResponse.deriv as JsonRecord)
+            : {};
+        const traderScopes = (livePoolApp.configured_scopes || ["trade"]).filter(
+          (s) => s !== "application_read",
+        );
+        snapshotResponse.deriv = {
+          ...existingDeriv,
+          oauthClientId: livePoolApp.oauth_client_id,
+          appId: livePoolApp.app_id,
+          gatewayUrl: "/api",
+          requiredScopes: Array.isArray(existingDeriv.requiredScopes) && existingDeriv.requiredScopes.length
+            ? existingDeriv.requiredScopes
+            : traderScopes.length ? traderScopes : ["trade"],
+          environment: livePoolApp.environment || "production",
+        };
+      }
       return json(snapshotResponse);
     }
 
@@ -401,11 +458,11 @@ Deno.serve(async req => {
         customCssVars,
       },
       deriv: {
-        oauthClientId: deriv?.oauth_client_id || undefined,
-        appId: deriv?.deriv_app_id || undefined,
+        oauthClientId: livePoolApp?.oauth_client_id || deriv?.oauth_client_id || undefined,
+        appId: livePoolApp?.app_id || deriv?.deriv_app_id || undefined,
         gatewayUrl: "/api",
         requiredScopes: ["trade"],
-        environment: "production",
+        environment: livePoolApp?.environment || "production",
       },
       features: {
         botIdeas: features?.bot_ideas ?? undefined,

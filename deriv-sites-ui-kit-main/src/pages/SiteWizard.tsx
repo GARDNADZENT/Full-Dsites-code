@@ -27,6 +27,7 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
+import { useAdminRole } from "@/hooks/useAdminRole";
 import { requiredScopesForFeatures, SCOPE_REGISTRY } from "@reef-sites/deriv-auth";
 import { TEMPLATE_REGISTRY } from "@reef-sites/template-registry";
 import type { DerivFeature, ValidationIssue } from "@reef-sites/shared-types";
@@ -42,6 +43,7 @@ import {
   extractVercelSlug,
   getRequiredDnsRecords,
   isVercelAppHostname,
+  isValidPolicyUrl,
   normalizeHostnameInput,
   normalizeVercelSlug,
   validateCustomHostname,
@@ -52,6 +54,25 @@ import {
   ProvisionDomainError,
   provisionSiteDomain,
 } from "@/lib/site-runtime-config";
+import {
+  assignPlatformDerivAppToSite,
+  assignSiteOwner,
+  CENTRAL_DERIV_CALLBACK_URL,
+  clampMarkupRate,
+  DEFAULT_MARKUP_RATE,
+  DEFAULT_RISK_DISCLAIMER,
+  formatMarkupRate,
+  decimalString,
+  getPlatformDerivPoolStatus,
+  listPlatformUsers,
+  MARKUP_PRESETS,
+  ownerShareRate,
+  suggestedVercelSlug,
+  type AssignPoolAppResult,
+  type PlatformDerivPoolStatus,
+  type PlatformUserOption,
+} from "@/lib/platform-deriv";
+import { Slider } from "@/components/ui/slider";
 
 type CommercialPlan = "partnership_monthly" | "one_time";
 
@@ -108,7 +129,16 @@ type WizardDraft = {
     poweredByDeriv: boolean;
   };
   template: { id: string; version: string };
-  deriv: { appId: string; oauthClientId: string; callbackUri: string; environment: "staging" | "production"; markupRate: string };
+  deriv: {
+    mode: "platform_managed" | "custom";
+    appId: string;
+    oauthClientId: string;
+    callbackUri: string;
+    environment: "staging" | "production";
+    markupRate: string;
+    ownerDerivLoginId: string;
+    affiliateId: string;
+  };
   features: Record<DerivFeature, boolean>;
   bots: ImportedBot[];
   navigation: Array<{ key: string; label: string; slug: string; enabled: boolean; order: number }>;
@@ -158,7 +188,16 @@ const initialDraft = (): WizardDraft => ({
     poweredByDeriv: true,
   },
   template: { id: "deriv-bot", version: "1.0.0" },
-  deriv: { appId: "", oauthClientId: "", callbackUri: "", environment: "production", markupRate: "" },
+  deriv: {
+    mode: "platform_managed",
+    appId: "",
+    oauthClientId: "",
+    callbackUri: CENTRAL_DERIV_CALLBACK_URL,
+    environment: "production",
+    markupRate: "2.5",
+    ownerDerivLoginId: "",
+    affiliateId: "",
+  },
   features: { public_market_data: true, account_list: true, options_trading: true, account_creation: false, wallet_balances: false, wallet_transactions: false, markup_statistics: false, application_management: false },
   bots: [],
   navigation: [
@@ -170,7 +209,12 @@ const initialDraft = (): WizardDraft => ({
     { key: "privacy", label: "Privacy", slug: "/privacy", enabled: true, order: 5 },
     { key: "terms", label: "Terms", slug: "/terms", enabled: true, order: 6 },
   ],
-  legal: { privacyUrl: "", termsUrl: "", riskDisclaimer: "", disclaimerText: "" },
+  legal: {
+    privacyUrl: "/privacy",
+    termsUrl: "/terms",
+    riskDisclaimer: DEFAULT_RISK_DISCLAIMER,
+    disclaimerText: "",
+  },
 });
 
 const getEffectiveHostname = (deployment: WizardDraft["deployment"]): string => {
@@ -199,14 +243,35 @@ const normalizeDraft = (value: Partial<WizardDraft>): WizardDraft => {
         ? "vercel_subdomain"
         : "custom_domain"
       : "vercel_subdomain");
+  const nameForSlug =
+    value.project?.siteName?.trim() || value.project?.internalName?.trim() || "";
   const inferredSlug =
     inferredMode === "vercel_subdomain"
-      ? normalizeVercelSlug(rawDeployment.subdomain || normalizedCustom)
+      ? normalizeVercelSlug(rawDeployment.subdomain || normalizedCustom) ||
+        suggestedVercelSlug(nameForSlug)
       : rawDeployment.subdomain || "";
   const syncedCustomDomain =
     inferredMode === "vercel_subdomain"
       ? buildVercelHostname(inferredSlug)
       : normalizedCustom;
+
+  const resolvedDeriv = { ...fallback.deriv, ...value.deriv };
+  if (resolvedDeriv.mode !== "custom") resolvedDeriv.mode = "platform_managed";
+  if (!Number.isFinite(Number(resolvedDeriv.markupRate)) || resolvedDeriv.markupRate === "") {
+    resolvedDeriv.markupRate = String(DEFAULT_MARKUP_RATE);
+  } else {
+    resolvedDeriv.markupRate = decimalString(resolvedDeriv.markupRate);
+  }
+  if (resolvedDeriv.mode === "platform_managed") {
+    resolvedDeriv.callbackUri = resolvedDeriv.callbackUri?.trim() || CENTRAL_DERIV_CALLBACK_URL;
+  }
+  if (!resolvedDeriv.ownerDerivLoginId) resolvedDeriv.ownerDerivLoginId = "";
+  if (!resolvedDeriv.affiliateId) resolvedDeriv.affiliateId = "";
+
+  const resolvedLegal = { ...fallback.legal, ...value.legal };
+  if (!resolvedLegal.privacyUrl?.trim()) resolvedLegal.privacyUrl = fallback.legal.privacyUrl;
+  if (!resolvedLegal.termsUrl?.trim()) resolvedLegal.termsUrl = fallback.legal.termsUrl;
+  if (!resolvedLegal.riskDisclaimer?.trim()) resolvedLegal.riskDisclaimer = DEFAULT_RISK_DISCLAIMER;
 
   return {
     ...fallback,
@@ -221,10 +286,10 @@ const normalizeDraft = (value: Partial<WizardDraft>): WizardDraft => {
     },
     branding: { ...fallback.branding, ...value.branding },
     template: { ...fallback.template, ...value.template },
-    deriv: { ...fallback.deriv, ...value.deriv },
+    deriv: resolvedDeriv,
     features: { ...fallback.features, ...value.features },
     bots: Array.isArray(value.bots) ? value.bots.map((bot, index) => ({ ...bot, category: "free", displayOrder: bot.displayOrder ?? index, isActive: bot.isActive ?? true })) : fallback.bots,
-    legal: { ...fallback.legal, ...value.legal },
+    legal: resolvedLegal,
     navigation,
   };
 };
@@ -235,7 +300,6 @@ const phonePattern = /^(\+?254|0)?[17]\d{8}$/;
 const validateDraft = (draft: WizardDraft): ValidationIssue[] => {
   const issues: ValidationIssue[] = [];
   const block = (code: string, message: string, field?: string) => issues.push({ code, message, field, severity: "blocking" });
-  const warn = (code: string, message: string, field?: string) => issues.push({ code, message, field, severity: "warning" });
 
   if (draft.project.siteName.trim().length < 2) block("site_name_missing", "Site name is required.", "project.siteName");
   if (!emailPattern.test(draft.project.supportEmail)) block("support_email_invalid", "A valid support email is required.", "project.supportEmail");
@@ -262,28 +326,39 @@ const validateDraft = (draft: WizardDraft): ValidationIssue[] => {
     }
   }
 
-  if (!draft.deriv.appId.trim()) block("deriv_app_id_missing", "Deriv App ID is required.", "deriv.appId");
-  if (!draft.deriv.oauthClientId.trim()) block("oauth_client_missing", "Deriv OAuth client ID is required.", "deriv.oauthClientId");
-  try {
-    const callback = new URL(draft.deriv.callbackUri);
-    const expected = effectiveDomain ? buildDerivCallbackUrl(effectiveDomain) : "";
-    if (callback.protocol !== "https:" || (expected && callback.toString() !== expected)) {
-      block("callback_invalid", `Register and enter the exact callback URL: ${expected || "https://your-domain/api/deriv-oauth-callback"}`, "deriv.callbackUri");
+  const platformManaged = draft.deriv.mode !== "custom";
+  if (platformManaged) {
+    // The superuser pool supplies the v2 DevHub App; the site only needs a markup tier.
+    const markup = Number(draft.deriv.markupRate);
+    if (!Number.isFinite(markup) || markup < 0 || markup > 3) {
+      block("markup_invalid", "Commission markup must be between 0% and 3%.", "deriv.markupRate");
     }
-  } catch {
-    block("callback_invalid", "The exact registered HTTPS callback URL is required.", "deriv.callbackUri");
+    const ownerLoginId = draft.deriv.ownerDerivLoginId.trim();
+    if (ownerLoginId && !/^(CR|MF|VRTC|VR|MLT|MX|SVG)\d{3,20}$/i.test(ownerLoginId)) {
+      block("owner_loginid_invalid", "Owner Deriv account must look like CR1234567 (or leave it blank).", "deriv.ownerDerivLoginId");
+    }
+  } else {
+    if (!draft.deriv.appId.trim()) block("deriv_app_id_missing", "Deriv App ID is required.", "deriv.appId");
+    if (!draft.deriv.oauthClientId.trim()) block("oauth_client_missing", "Deriv OAuth client ID is required.", "deriv.oauthClientId");
+    try {
+      const callback = new URL(draft.deriv.callbackUri);
+      const expected = effectiveDomain ? buildDerivCallbackUrl(effectiveDomain) : "";
+      if (callback.protocol !== "https:" || (expected && callback.toString() !== expected)) {
+        block("callback_invalid", `Register and enter the exact callback URL: ${expected || "https://your-domain/api/deriv-oauth-callback"}`, "deriv.callbackUri");
+      }
+    } catch {
+      block("callback_invalid", "The exact registered HTTPS callback URL is required.", "deriv.callbackUri");
+    }
   }
-  if (!draft.branding.logoUrl) warn("logo_missing", "Add a logo before launch.", "branding.logoUrl");
-  if (draft.bots.length === 0) warn("free_bots_empty", "No free bots have been imported yet.", "bots");
-  if (!draft.legal.privacyUrl) block("privacy_missing", "Privacy policy URL is required.", "legal.privacyUrl");
-  if (!draft.legal.termsUrl) block("terms_missing", "Terms URL is required.", "legal.termsUrl");
+  if (!draft.legal.privacyUrl.trim()) block("privacy_missing", "Privacy policy URL is required.", "legal.privacyUrl");
+  else if (!isValidPolicyUrl(draft.legal.privacyUrl)) block("privacy_invalid", "Privacy policy must be a /path on this site or a full https:// URL.", "legal.privacyUrl");
+  if (!draft.legal.termsUrl.trim()) block("terms_missing", "Terms URL is required.", "legal.termsUrl");
+  else if (!isValidPolicyUrl(draft.legal.termsUrl)) block("terms_invalid", "Terms must be a /path on this site or a full https:// URL.", "legal.termsUrl");
   if (!draft.legal.riskDisclaimer.trim()) block("risk_missing", "A risk disclaimer is required.", "legal.riskDisclaimer");
   if (!emailPattern.test(draft.commercial.paymentEmail)) block("payment_email_missing", "Payment email is required at the final step.", "commercial.paymentEmail");
   if (!phonePattern.test(draft.commercial.paymentPhone.replace(/\s+/g, "").replace(/-/g, ""))) block("payment_phone_missing", "A valid M-Pesa phone number is required at the final step.", "commercial.paymentPhone");
   if (!draft.commercial.acceptedTerms) block("payment_terms_missing", "Accept the selected payment terms before publishing.", "commercial.acceptedTerms");
 
-  const markup = Number(draft.deriv.markupRate || 0);
-  if (!Number.isFinite(markup) || markup < 0) block("markup_invalid", "Markup must be zero or a supported positive value.", "deriv.markupRate");
   for (const item of draft.navigation) {
     if (item.enabled && !item.slug.startsWith("/")) block("route_invalid", `${item.label} needs a route beginning with /.`, "navigation");
   }
@@ -301,6 +376,13 @@ const formatColorLabel = (key: string) =>
     .replace(/([A-Z])/g, " $1")
     .replace(/^./, char => char.toUpperCase());
 
+const DerivMark = ({ className }: { className?: string }) => (
+  <svg viewBox="0 0 24 24" aria-hidden="true" className={className} fill="none">
+    <path d="M3 12.2 8.4 6.6h6.2c3.1 0 5.4 2.3 5.4 5.4s-2.3 5.4-5.4 5.4H8.4L3 12.2Z" fill="currentColor" opacity="0.28" />
+    <path d="M7.4 12.2 10.6 9h4c1.9 0 3.2 1.4 3.2 3.2s-1.3 3.2-3.2 3.2h-4l-3.2-3.2Z" fill="currentColor" />
+  </svg>
+);
+
 const Field = ({ label, children, help }: { label: string; children: React.ReactNode; help?: string }) => (
   <label className="block space-y-1.5">
     <span className="block text-sm font-medium text-slate-800">{label}</span>
@@ -313,6 +395,7 @@ const SiteWizard = () => {
   const { siteId = "" } = useParams();
   const navigate = useNavigate();
   const { user } = useAuth();
+  const { isAdmin, canManageSites } = useAdminRole();
   const [step, setStep] = useState(1);
   const [draft, setDraft] = useState<WizardDraft>(initialDraft);
   const [organisationId, setOrganisationId] = useState("");
@@ -329,6 +412,11 @@ const SiteWizard = () => {
   const [domainActionPending, setDomainActionPending] = useState<false | "attach" | "verify">(false);
   const [vercelVerification, setVercelVerification] = useState<DomainVerificationRecord[]>([]);
   const [slugSuggestions, setSlugSuggestions] = useState<string[]>([]);
+  const [poolStatus, setPoolStatus] = useState<PlatformDerivPoolStatus | null>(null);
+  const [platformUsers, setPlatformUsers] = useState<PlatformUserOption[]>([]);
+  const [ownerUserId, setOwnerUserId] = useState("");
+  const [ownerAssignPending, setOwnerAssignPending] = useState(false);
+  const [derivAssignPending, setDerivAssignPending] = useState(false);
   const replayingPublish = useRef(false);
   const effectiveHostname = useMemo(() => getEffectiveHostname(draft.deployment), [draft.deployment]);
   const expectedCallbackUri = useMemo(
@@ -352,6 +440,113 @@ const SiteWizard = () => {
   const selectedPlan = draft.commercial.plan === "partnership_monthly"
     ? { title: "Partnership monthly", price: "17%", detail: "Monthly platform share after the site is live." }
     : { title: "One-time setup", price: "KES 25,000", detail: "Single setup payment collected at the final step." };
+
+  const platformManaged = draft.deriv.mode !== "custom";
+  const markupValue = clampMarkupRate(draft.deriv.markupRate);
+  const platformFeeRate = draft.commercial.plan === "one_time"
+    ? 0
+    : Number(((poolStatus?.defaultPlatformFeeRate ?? 17) as number).toFixed(2));
+  const siteOwnerShare = ownerShareRate(platformFeeRate);
+  const showOwnerSelector = Boolean(isAdmin || canManageSites);
+
+  const setDerivMode = (mode: "platform_managed" | "custom") => {
+    setDraft(current => ({
+      ...current,
+      deriv: {
+        ...current.deriv,
+        mode,
+        callbackUri:
+          mode === "platform_managed"
+            ? CENTRAL_DERIV_CALLBACK_URL
+            : current.deriv.callbackUri?.trim() || (effectiveHostname ? buildDerivCallbackUrl(effectiveHostname) : ""),
+      },
+    }));
+  };
+
+  const setMarkupRate = (value: number) => {
+    const next = clampMarkupRate(value);
+    setDraft(current => ({ ...current, deriv: { ...current.deriv, markupRate: decimalString(next) } }));
+  };
+
+  useEffect(() => {
+    if (!user) return;
+    let active = true;
+    getPlatformDerivPoolStatus()
+      .then(status => {
+        if (active) setPoolStatus(status);
+      })
+      .catch(() => {
+        /* pool status is advisory only */
+      });
+    return () => {
+      active = false;
+    };
+  }, [user]);
+
+  useEffect(() => {
+    if (!showOwnerSelector) return;
+    let active = true;
+    listPlatformUsers()
+      .then(users => {
+        if (active) setPlatformUsers(users);
+      })
+      .catch(() => {
+        /* owner picker stays hidden when the admin API is unavailable */
+      });
+    return () => {
+      active = false;
+    };
+  }, [showOwnerSelector]);
+
+  const handleAssignOwner = async (nextUserId: string) => {
+    setOwnerUserId(nextUserId);
+    if (!nextUserId || !siteId) return;
+    setOwnerAssignPending(true);
+    try {
+      const result = await assignSiteOwner(siteId, { userId: nextUserId });
+      if (result.organisationId) setOrganisationId(result.organisationId);
+      toast.success(`Site assigned to ${result.assignedOwner?.email || "the selected user"}`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to assign the site owner");
+      setOwnerUserId("");
+    } finally {
+      setOwnerAssignPending(false);
+    }
+  };
+
+  const syncPlatformDerivApp = async (draftToSave: WizardDraft) => {
+    if (!siteId || draftToSave.deriv.mode === "custom") return null;
+    setDerivAssignPending(true);
+    try {
+      const result = await assignPlatformDerivAppToSite({
+        siteId,
+        markupPercentage: clampMarkupRate(draftToSave.deriv.markupRate),
+        environment: draftToSave.deriv.environment,
+        scopes: ["trade"],
+        plan: draftToSave.commercial.plan,
+        ownerDerivLoginId: draftToSave.deriv.ownerDerivLoginId,
+        derivAffiliateId: draftToSave.deriv.affiliateId,
+      });
+      setDraft(current => ({
+        ...current,
+        deriv: {
+          ...current.deriv,
+          appId: result.appId || "",
+          oauthClientId: result.oauthClientId || "",
+          callbackUri: result.callbackUri || CENTRAL_DERIV_CALLBACK_URL,
+        },
+      }));
+      if (result.status === "queued_for_pool") {
+        toast.info("Markup saved. The platform Deriv App pool is being provisioned — this site binds automatically.", { id: "pool-queued" });
+      }
+      return result;
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Unable to bind the platform Deriv app");
+      return null;
+    } finally {
+      setDerivAssignPending(false);
+    }
+  };
 
   useEffect(() => {
     if (!siteId || !user) return;
@@ -389,10 +584,21 @@ const SiteWizard = () => {
               loaded.deployment.domainMode = site.domain_id ? "buy_domain" : "custom_domain";
               loaded.deployment.customDomain = dbHost;
             }
-            if (!loaded.deriv.callbackUri) {
+            if (loaded.deriv.mode === "custom" && !loaded.deriv.callbackUri) {
               loaded.deriv.callbackUri = buildDerivCallbackUrl(dbHost);
             }
           }
+          // Heal drafts created before the platform pool existed.
+          loaded.deriv.mode = site.deriv_mode === "custom" ? "custom" : "platform_managed";
+          loaded.deriv.markupRate = decimalString(site.requested_markup_rate ?? loaded.deriv.markupRate);
+          loaded.deriv.ownerDerivLoginId = site.owner_deriv_loginid || loaded.deriv.ownerDerivLoginId || "";
+          loaded.deriv.affiliateId = site.deriv_affiliate_id || loaded.deriv.affiliateId || "";
+          if (loaded.deriv.mode === "platform_managed") {
+            loaded.deriv.callbackUri = loaded.deriv.callbackUri || CENTRAL_DERIV_CALLBACK_URL;
+          }
+          if (!loaded.project.supportEmail) loaded.project.supportEmail = user.email || "";
+          if (!loaded.commercial.paymentEmail) loaded.commercial.paymentEmail = loaded.project.supportEmail || user.email || "";
+          if (!loaded.commercial.paymentPhone) loaded.commercial.paymentPhone = loaded.project.supportContact || "";
           setDraft(loaded);
           setConfigurationId(configuration.id);
           setConfigurationVersion(configuration.version);
@@ -427,8 +633,20 @@ const SiteWizard = () => {
             deployment: {
               ...current.deployment,
               domainMode: initialMode,
-              subdomain: isVercelAppHostname(dbHost) ? extractVercelSlug(dbHost) : "",
-              customDomain: dbHost,
+              subdomain:
+                (isVercelAppHostname(dbHost) ? extractVercelSlug(dbHost) : "") ||
+                suggestedVercelSlug(
+                  settings.data?.site_name || (site.name === "Untitled site" ? "" : site.name),
+                  site.internal_name,
+                ),
+              customDomain:
+                dbHost ||
+                buildVercelHostname(
+                  suggestedVercelSlug(
+                    settings.data?.site_name || (site.name === "Untitled site" ? "" : site.name),
+                    site.internal_name,
+                  ),
+                ),
             },
             branding: {
               ...current.branding,
@@ -444,10 +662,20 @@ const SiteWizard = () => {
             },
             deriv: {
               ...current.deriv,
+              mode: site.deriv_mode === "custom" ? "custom" : "platform_managed",
+              markupRate: decimalString(site.requested_markup_rate ?? current.deriv.markupRate),
+              ownerDerivLoginId: site.owner_deriv_loginid || "",
+              affiliateId: site.deriv_affiliate_id || "",
               appId: derivApp.data?.deriv_app_id || "",
               oauthClientId: derivApp.data?.oauth_client_id || "",
               callbackUri:
-                derivApp.data?.redirect_uri || (dbHost ? buildDerivCallbackUrl(dbHost) : ""),
+                site.deriv_mode === "custom"
+                  ? derivApp.data?.redirect_uri || (dbHost ? buildDerivCallbackUrl(dbHost) : "")
+                  : derivApp.data?.redirect_uri || CENTRAL_DERIV_CALLBACK_URL,
+            },
+            commercial: {
+              ...current.commercial,
+              paymentEmail: current.commercial.paymentEmail || current.project.supportEmail || user.email || "",
             },
             bots: (bots.data || []).map((bot: { id: string; bot_id?: string | null; display_name: string; description?: string | null; file_path?: string | null; category?: string | null; display_order?: number | null; is_active?: boolean | null }, index: number) => ({
               id: bot.bot_id || bot.id,
@@ -469,13 +697,69 @@ const SiteWizard = () => {
     })();
   }, [siteId, user]);
 
-  const updateProject = (key: keyof WizardDraft["project"], value: string) => setDraft(current => ({ ...current, project: { ...current.project, [key]: value } }));
+  const updateProject = (key: keyof WizardDraft["project"], value: string) => setDraft(current => {
+    const nextProject = { ...current.project, [key]: value };
+    // Auto-derive the free .vercel.app slug until the operator edits it manually.
+    if (
+      (key === "siteName" || key === "internalName") &&
+      current.deployment.domainMode === "vercel_subdomain"
+    ) {
+      const previousSuggestion = normalizeVercelSlug(
+        suggestedVercelSlug(current.project.siteName, current.project.internalName),
+      );
+      const slugIsAuto =
+        !current.deployment.subdomain || current.deployment.subdomain === previousSuggestion;
+      if (slugIsAuto) {
+        const nextSlug = suggestedVercelSlug(nextProject.siteName, nextProject.internalName);
+        const prevHost = getEffectiveHostname(current.deployment);
+        const nextHost = nextSlug ? buildVercelHostname(nextSlug) : "";
+        const nextDeployment = {
+          ...current.deployment,
+          subdomain: nextSlug,
+          customDomain: nextHost,
+        };
+        return {
+          ...current,
+          project: nextProject,
+          deployment: nextDeployment,
+          branding: {
+            ...current.branding,
+            siteTitle:
+              current.branding.siteTitle && current.branding.siteTitle !== current.project.siteName
+                ? current.branding.siteTitle
+                : nextProject.siteName,
+          },
+          deriv: {
+            ...current.deriv,
+            callbackUri: syncCallbackForNextHost(prevHost, nextHost, current.deriv.callbackUri, current.deriv.mode),
+          },
+        };
+      }
+    }
+    return { ...current, project: nextProject };
+  });
   const updateDeployment = (key: keyof WizardDraft["deployment"], value: string) => setDraft(current => ({ ...current, deployment: { ...current.deployment, [key]: value } }));
   const updateBranding = (key: keyof WizardDraft["branding"], value: string | boolean) => setDraft(current => ({ ...current, branding: { ...current.branding, [key]: value } }));
   const updateDeriv = (key: keyof WizardDraft["deriv"], value: string) => setDraft(current => ({ ...current, deriv: { ...current.deriv, [key]: value } }));
-  const updateCommercial = (key: keyof WizardDraft["commercial"], value: string | boolean) => setDraft(current => ({ ...current, commercial: { ...current.commercial, [key]: value } }));
+  const updateCommercial = (key: keyof WizardDraft["commercial"], value: string | boolean) => setDraft(current => {
+    const nextCommercial = { ...current.commercial, [key]: value };
+    // Keep payment details pre-filled from the support identity unless the operator typed them.
+    if (key === "paymentEmail" && !String(value).trim()) {
+      nextCommercial.paymentEmail = current.project.supportEmail || "";
+    }
+    if (key === "paymentPhone" && !String(value).trim()) {
+      nextCommercial.paymentPhone = current.project.supportContact || "";
+    }
+    return { ...current, commercial: nextCommercial };
+  });
 
-  const syncCallbackForNextHost = (prevHost: string, nextHost: string, currentCallback: string) => {
+  const syncCallbackForNextHost = (
+    prevHost: string,
+    nextHost: string,
+    currentCallback: string,
+    mode: "platform_managed" | "custom" = "custom",
+  ) => {
+    if (mode !== "custom") return CENTRAL_DERIV_CALLBACK_URL;
     const prevExpected = prevHost ? buildDerivCallbackUrl(prevHost) : "";
     const nextExpected = nextHost ? buildDerivCallbackUrl(nextHost) : "";
     if (!currentCallback.trim() || currentCallback.trim() === prevExpected) {
@@ -505,7 +789,7 @@ const SiteWizard = () => {
           },
           deriv: {
             ...current.deriv,
-            callbackUri: syncCallbackForNextHost(prevHost, nextHost, current.deriv.callbackUri),
+            callbackUri: syncCallbackForNextHost(prevHost, nextHost, current.deriv.callbackUri, current.deriv.mode),
           },
         };
       }
@@ -522,7 +806,7 @@ const SiteWizard = () => {
         deriv: {
           ...current.deriv,
           callbackUri: nextCustom
-            ? syncCallbackForNextHost(prevHost, nextCustom, current.deriv.callbackUri)
+            ? syncCallbackForNextHost(prevHost, nextCustom, current.deriv.callbackUri, current.deriv.mode)
             : current.deriv.callbackUri,
         },
       };
@@ -550,7 +834,7 @@ const SiteWizard = () => {
         },
         deriv: {
           ...current.deriv,
-          callbackUri: syncCallbackForNextHost(prevHost, nextHost, current.deriv.callbackUri),
+          callbackUri: syncCallbackForNextHost(prevHost, nextHost, current.deriv.callbackUri, current.deriv.mode),
         },
       };
     });
@@ -574,6 +858,7 @@ const SiteWizard = () => {
             prevHost,
             nextNormalized,
             current.deriv.callbackUri,
+            current.deriv.mode,
           ),
         },
       };
@@ -713,6 +998,15 @@ const SiteWizard = () => {
           customDomain: resolvedDomain,
         },
       };
+      let platformAssign: AssignPoolAppResult | null = null;
+      if (syncedDraft.deriv.mode !== "custom") {
+        platformAssign = await syncPlatformDerivApp(syncedDraft);
+        if (platformAssign?.appId) {
+          syncedDraft.deriv.appId = platformAssign.appId;
+          syncedDraft.deriv.oauthClientId = platformAssign.oauthClientId || platformAssign.appId;
+          syncedDraft.deriv.callbackUri = platformAssign.callbackUri;
+        }
+      }
       const draftIssues = validateDraft(syncedDraft);
       const draftScopes = requiredScopesForFeatures(Object.entries(syncedDraft.features).filter(([, enabled]) => enabled).map(([key]) => key as DerivFeature));
       const payload = {
@@ -737,7 +1031,19 @@ const SiteWizard = () => {
       setConfigurationVersion(data.version);
       const nextSiteName = syncedDraft.project.siteName.trim() || "Untitled site";
       const writes = [
-        db.from("sites").update({ name: nextSiteName, internal_name: syncedDraft.project.internalName.trim() || nextSiteName, description: syncedDraft.project.description.trim(), default_language: syncedDraft.project.language, target_region: syncedDraft.project.region || null, configuration_status: payload.status }).eq("id", siteId),
+        db.from("sites").update({
+          name: nextSiteName,
+          internal_name: syncedDraft.project.internalName.trim() || nextSiteName,
+          description: syncedDraft.project.description.trim(),
+          default_language: syncedDraft.project.language,
+          target_region: syncedDraft.project.region || null,
+          configuration_status: payload.status,
+          deriv_mode: syncedDraft.deriv.mode,
+          requested_markup_rate: clampMarkupRate(syncedDraft.deriv.markupRate),
+          platform_fee_rate: syncedDraft.commercial.plan === "one_time" ? 0 : platformFeeRate,
+          owner_deriv_loginid: syncedDraft.deriv.ownerDerivLoginId.trim() || null,
+          deriv_affiliate_id: syncedDraft.deriv.affiliateId.trim() || null,
+        }).eq("id", siteId),
         db.from("site_settings").upsert({
           site_id: siteId,
           site_name: syncedDraft.branding.siteTitle || nextSiteName,
@@ -754,10 +1060,20 @@ const SiteWizard = () => {
             "--site-radius": syncedDraft.branding.borderRadius,
           },
         }, { onConflict: "site_id" }),
-        db.from("site_deriv_apps").upsert({ site_id: siteId, deriv_app_id: syncedDraft.deriv.appId || null, oauth_client_id: syncedDraft.deriv.oauthClientId || null, redirect_uri: syncedDraft.deriv.callbackUri || null, use_legacy_oauth_login: false, include_legacy_app_id_in_oauth: false }, { onConflict: "site_id" }),
+        db.from("site_deriv_apps").upsert({
+          site_id: siteId,
+          deriv_app_id: syncedDraft.deriv.appId || null,
+          oauth_client_id: syncedDraft.deriv.oauthClientId || null,
+          redirect_uri: syncedDraft.deriv.callbackUri || CENTRAL_DERIV_CALLBACK_URL,
+          use_legacy_oauth_login: false,
+          include_legacy_app_id_in_oauth: false,
+          deriv_mode: syncedDraft.deriv.mode,
+          markup_percentage: clampMarkupRate(syncedDraft.deriv.markupRate),
+          platform_deriv_app_id: platformAssign?.status === "assigned" ? platformAssign.platformDerivAppId : null,
+        }, { onConflict: "site_id" }),
       ];
-      if (syncedDraft.deriv.appId.trim() && syncedDraft.deriv.oauthClientId.trim() && syncedDraft.deriv.callbackUri.trim()) {
-        writes.push(db.from("deriv_applications").upsert({ organisation_id: organisationId, site_id: siteId, app_id: syncedDraft.deriv.appId.trim(), oauth_client_id: syncedDraft.deriv.oauthClientId.trim(), callback_uri: syncedDraft.deriv.callbackUri.trim(), environment: syncedDraft.deriv.environment, configured_scopes: draftScopes, markup_rate: syncedDraft.deriv.markupRate ? Number(syncedDraft.deriv.markupRate) : null, verification_status: "configured" }, { onConflict: "site_id" }));
+      if (syncedDraft.deriv.mode === "custom" && syncedDraft.deriv.appId.trim() && syncedDraft.deriv.oauthClientId.trim() && syncedDraft.deriv.callbackUri.trim()) {
+        writes.push(db.from("deriv_applications").upsert({ organisation_id: organisationId, site_id: siteId, app_id: syncedDraft.deriv.appId.trim(), oauth_client_id: syncedDraft.deriv.oauthClientId.trim(), callback_uri: syncedDraft.deriv.callbackUri.trim(), environment: syncedDraft.deriv.environment, configured_scopes: draftScopes, markup_rate: syncedDraft.deriv.markupRate ? Number(syncedDraft.deriv.markupRate) : null, verification_status: "configured", source_type: "custom", platform_deriv_app_id: null }, { onConflict: "site_id" }));
       }
       const results = await Promise.all(writes);
       const failedWrite = results.find(result => result.error);
@@ -785,7 +1101,10 @@ const SiteWizard = () => {
         const { error: botsError } = await db.from("site_bots_manifest").insert(botRows);
         if (botsError) throw botsError;
       }
-      toast.success("Draft saved");
+      setDraft(syncedDraft);
+      toast.success(
+        platformAssign?.status === "queued_for_pool" ? "Draft saved · queued for the platform Deriv app pool" : "Draft saved",
+      );
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Failed to save draft");
       throw error;
@@ -810,19 +1129,27 @@ const SiteWizard = () => {
     try {
       await saveDraft(10);
       if (effectiveHostname) {
-        const provisioned = await provisionSiteDomain(siteId, {
-          action: "provision",
-          hostname: effectiveHostname,
-        });
-        if (provisioned.domain) {
-          setSavedDomainState({
-            hostname: provisioned.domain.hostname,
-            status: provisioned.domain.status,
-            isVerified: provisioned.domain.isVerified,
+        try {
+          const provisioned = await provisionSiteDomain(siteId, {
+            action: "provision",
+            hostname: effectiveHostname,
           });
-        }
-        if (provisioned.domainVerification.length) {
-          setVercelVerification(provisioned.domainVerification);
+          if (provisioned.domain) {
+            setSavedDomainState({
+              hostname: provisioned.domain.hostname,
+              status: provisioned.domain.status,
+              isVerified: provisioned.domain.isVerified,
+            });
+          }
+          if (provisioned.domainVerification.length) {
+            setVercelVerification(provisioned.domainVerification);
+          }
+        } catch (domainError) {
+          // A missing server-side Vercel token must not block the GitHub commit/publish flow.
+          const message = domainError instanceof Error ? domainError.message : "";
+          if (domainError instanceof ProvisionDomainError && domainError.suggestions.length) throw domainError;
+          if (!/VERCEL_ACCESS_TOKEN|vercel.*token|not configured/i.test(message)) throw domainError;
+          toast.info("Domain attach skipped — Vercel token is not configured. Publishing the site anyway.");
         }
       }
       await invokePublish();
@@ -984,28 +1311,194 @@ const SiteWizard = () => {
             ) : null}
 
             {step === 2 ? (
-              <section className="space-y-5">
-                <div>
-                  <h2 className="text-xl font-semibold text-slate-950">Name the business</h2>
-                  <p className="mt-1 text-sm text-slate-600">This becomes the public identity for the customer site and the internal record for your manager.</p>
+              <section className="space-y-6">
+                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                  <div>
+                    <h2 className="text-xl font-semibold text-slate-950">Who is this site for?</h2>
+                    <p className="mt-1 text-sm text-slate-600">Give it a name, a free public URL, and set the Deriv commission markup before anything else.</p>
+                  </div>
+                  <div className={`inline-flex shrink-0 items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium ${poolStatus?.poolReady ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-amber-200 bg-amber-50 text-amber-900"}`}>
+                    <DerivMark className="h-3.5 w-3.5" />
+                    {poolStatus?.poolReady
+                      ? `${poolStatus.activeAppCount} v2 DevHub App${poolStatus.activeAppCount === 1 ? "" : "s"} ready`
+                      : "Deriv App pool warming up"}
+                  </div>
                 </div>
-                <div className="grid gap-4 md:grid-cols-2">
+
+                {showOwnerSelector ? (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-slate-950">Create for another user</p>
+                        <p className="text-xs text-slate-600">Assign the site, its organisation and Deriv attribution to an existing account.</p>
+                      </div>
+                      <select
+                        className="h-9 min-w-[240px] rounded-md border border-slate-300 bg-white px-2 text-sm text-slate-900"
+                        value={ownerUserId}
+                        disabled={ownerAssignPending}
+                        onChange={event => void handleAssignOwner(event.target.value)}
+                      >
+                        <option value="">Keep current owner</option>
+                        {platformUsers.map(option => (
+                          <option key={option.id} value={option.id}>{option.email}{option.display_name ? ` · ${option.display_name}` : ""}</option>
+                        ))}
+                      </select>
+                    </div>
+                    {ownerAssignPending ? (
+                      <p className="mt-2 flex items-center gap-1.5 text-xs text-slate-600"><Loader2 className="h-3 w-3 animate-spin" />Reassigning owner…</p>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                <div className="grid gap-4">
                   <Field label="Site name">{input(draft.project.siteName, value => updateProject("siteName", value), "text", "e.g. Apex Traders Hub")}</Field>
-                  <Field label="Internal project name">{input(draft.project.internalName, value => updateProject("internalName", value), "text", "e.g. apex-traders")}</Field>
-                  <Field label="Owner or organisation">{input(draft.project.organisationName, value => updateProject("organisationName", value), "text", "e.g. Apex Trading Group")}</Field>
+                  <div className="grid gap-4 md:grid-cols-2">
+                    <Field label="Internal project name">{input(draft.project.internalName, value => updateProject("internalName", value), "text", "e.g. apex-traders")}</Field>
+                    <Field label="Owner or organisation">{input(draft.project.organisationName, value => updateProject("organisationName", value), "text", "e.g. Apex Trading Group")}</Field>
+                  </div>
+                  <Field label="Site title" help="Shown in the browser tab and the public header.">{input(draft.branding.siteTitle, value => updateBranding("siteTitle", value), "text", draft.project.siteName || "e.g. Apex Traders — Automated Bots")}</Field>
+                  <Field label="Description">
+                    <textarea
+                      className="min-h-24 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-sky-600 focus:outline-none focus:ring-2 focus:ring-sky-600/20"
+                      placeholder="Briefly describe your trading community, bots, and education offering..."
+                      value={draft.project.description}
+                      onChange={event => updateProject("description", event.target.value)}
+                    />
+                  </Field>
+                </div>
+
+                <div className="rounded-lg border border-slate-200 p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-950">Domain</p>
+                      <p className="text-xs text-slate-600">Launch free on <code>.vercel.app</code>, connect a domain you own, or buy a new one.</p>
+                    </div>
+                    <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-800">No setup required</span>
+                  </div>
+
+                  <div className="mt-3 grid gap-2 sm:grid-cols-3">
+                    {([
+                      { mode: "vercel_subdomain" as const, label: "Free Vercel URL", hint: "Instant SSL" },
+                      { mode: "custom_domain" as const, label: "Connect own", hint: "Point DNS" },
+                      { mode: "buy_domain" as const, label: "Buy domain", hint: "M-Pesa" },
+                    ]).map(option => (
+                      <button
+                        key={option.mode}
+                        type="button"
+                        onClick={() => selectDomainMode(option.mode)}
+                        className={`rounded-md border px-3 py-2 text-left text-xs transition ${draft.deployment.domainMode === option.mode ? "border-sky-500 bg-sky-50 ring-1 ring-sky-500/30" : "border-slate-200 bg-white hover:border-slate-300"}`}
+                      >
+                        <span className="block font-semibold text-slate-950">{option.label}</span>
+                        <span className="text-slate-500">{option.hint}</span>
+                      </button>
+                    ))}
+                  </div>
+
+                  <div className="mt-3 space-y-1.5">
+                    {draft.deployment.domainMode === "vercel_subdomain" ? (
+                      <div className="flex items-center rounded-md border border-slate-300 bg-white focus-within:border-sky-500 focus-within:ring-2 focus-within:ring-sky-500/20">
+                        <span className="pl-3 text-sm text-slate-400 select-none">https://</span>
+                        <input
+                          type="text"
+                          value={draft.deployment.subdomain}
+                          onChange={event => handleVercelSlugChange(event.target.value)}
+                          placeholder="alpha-traders"
+                          className="flex-1 bg-transparent px-1.5 py-2 text-sm text-slate-950 outline-none"
+                        />
+                        <span className="pr-3 text-sm font-medium text-slate-500 select-none">{VERCEL_SUFFIX}</span>
+                      </div>
+                    ) : (
+                      <Input
+                        value={draft.deployment.customDomain}
+                        onChange={event => handleCustomDomainChange(event.target.value, false)}
+                        onBlur={event => handleCustomDomainChange(event.target.value, true)}
+                        placeholder="mybrand.com or trade.mybrand.com"
+                        className="bg-white"
+                      />
+                    )}
+                    {(() => {
+                      if (draft.deployment.domainMode === "vercel_subdomain" && !draft.deployment.subdomain) {
+                        return <p className="text-xs text-slate-500">Type a site name above and the free URL fills in automatically.</p>;
+                      }
+                      const check = draft.deployment.domainMode === "vercel_subdomain"
+                        ? validateVercelSlug(draft.deployment.subdomain)
+                        : validateCustomHostname(draft.deployment.customDomain);
+                      if (!check.valid) return <p className="text-xs text-red-600">{check.error}</p>;
+                      return (
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <span className="text-xs text-slate-600">Public URL: <strong className="text-slate-950">https://{check.hostname}</strong></span>
+                          <div className="flex gap-2">
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              disabled={Boolean(domainActionPending)}
+                              onClick={() => handleVerifyOrAttachDomain("attach")}
+                            >
+                              {domainActionPending === "attach" ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <Sparkles className="mr-1.5 h-3.5 w-3.5 text-sky-600" />}
+                              Claim on Vercel
+                            </Button>
+                            {draft.deployment.domainMode === "buy_domain" ? (
+                              <Button type="button" size="sm" onClick={() => setBuyDialogOpen(true)}>
+                                <ShoppingCart className="mr-1.5 h-3.5 w-3.5" />Buy domain
+                              </Button>
+                            ) : null}
+                          </div>
+                        </div>
+                      );
+                    })()}
+                  </div>
+                </div>
+
+                <div className="rounded-lg border border-slate-200 p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-2">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-950">Commission Markup</p>
+                      <p className="text-xs text-slate-600">You keep {siteOwnerShare}% of the Deriv markup generated here. Deriv allows 0%–3%.</p>
+                    </div>
+                    <span className="rounded-md bg-slate-950 px-2.5 py-1 text-sm font-semibold text-white">{formatMarkupRate(markupValue)}</span>
+                  </div>
+                  <div className="mt-4 px-1">
+                    <Slider
+                      value={[markupValue]}
+                      min={0}
+                      max={3}
+                      step={0.5}
+                      onValueChange={values => setMarkupRate(values[0] ?? DEFAULT_MARKUP_RATE)}
+                    />
+                  </div>
+                  <div className="mt-3 flex flex-wrap gap-1.5">
+                    {MARKUP_PRESETS.map(preset => (
+                      <button
+                        key={preset}
+                        type="button"
+                        onClick={() => setMarkupRate(preset)}
+                        className={`rounded-full border px-2.5 py-1 text-xs font-medium transition ${Math.abs(markupValue - preset) < 0.001 ? "border-sky-500 bg-sky-50 text-sky-800" : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"}`}
+                      >
+                        {formatMarkupRate(preset)}
+                      </button>
+                    ))}
+                  </div>
+                  <div className="mt-4 flex items-start gap-2 rounded-md border border-sky-200 bg-sky-50 p-3 text-xs text-sky-900">
+                    <DerivMark className="mt-0.5 h-4 w-4 shrink-0 text-sky-700" />
+                    <span>
+                      <strong>Automatic v2 DevHub App.</strong>{" "}
+                      {poolStatus?.poolReady
+                        ? `This site binds the ${formatMarkupRate(markupValue)} tier app automatically — no Deriv dashboard work needed.`
+                        : "The superuser Deriv App pool is being provisioned. The site saves now and binds the moment a pool app exists."}
+                      {draft.deriv.appId ? <> Current app ID: <code className="text-slate-900">{draft.deriv.appId}</code>.</> : null}
+                    </span>
+                  </div>
+                </div>
+
+                <div className="grid gap-4 md:grid-cols-2">
                   <Field label="Support email">{input(draft.project.supportEmail, value => updateProject("supportEmail", value), "email", "support@yourdomain.com")}</Field>
                   <Field label="Support contact">{input(draft.project.supportContact, value => updateProject("supportContact", value), "text", "+254 712 345 678 or @telegram")}</Field>
+                  <Field label="Owner Deriv account" help="Optional. CR/MF account used for commission payouts.">{input(draft.deriv.ownerDerivLoginId, value => updateDeriv("ownerDerivLoginId", value.toUpperCase()), "text", "CR1234567")}</Field>
+                  <Field label="Deriv affiliate ID" help="Optional. Credited alongside the platform markup.">{input(draft.deriv.affiliateId, value => updateDeriv("affiliateId", value), "text", "e.g. 12345")}</Field>
                   <Field label="Default language">{input(draft.project.language, value => updateProject("language", value), "text", "en")}</Field>
                   <Field label="Target region">{input(draft.project.region, value => updateProject("region", value), "text", "e.g. Kenya / Global")}</Field>
                 </div>
-                <Field label="Description">
-                  <textarea
-                    className="min-h-24 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-sky-600 focus:outline-none focus:ring-2 focus:ring-sky-600/20"
-                    placeholder="Briefly describe your trading community, bots, and education offering..."
-                    value={draft.project.description}
-                    onChange={event => updateProject("description", event.target.value)}
-                  />
-                </Field>
               </section>
             ) : null}
 
@@ -1123,17 +1616,105 @@ const SiteWizard = () => {
                   <h2 className="text-xl font-semibold">Deriv app and trading tools</h2>
                   <p className="mt-1 text-sm text-slate-500">Select only the tools the site needs. Required Deriv scopes update automatically.</p>
                 </div>
-                <div className="grid gap-4 md:grid-cols-2">
-                  <Field label="Deriv App ID">{input(draft.deriv.appId, value => updateDeriv("appId", value), "text", "e.g. 68001")}</Field>
-                  <Field label="OAuth client ID">{input(draft.deriv.oauthClientId, value => updateDeriv("oauthClientId", value), "text", "Optional OAuth client ID")}</Field>
-                  <Field label="Environment">
-                    <select className="h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-900 focus:border-sky-600 focus:outline-none focus:ring-2 focus:ring-sky-600/20" value={draft.deriv.environment} onChange={event => updateDeriv("environment", event.target.value)}>
-                      <option value="production">Production</option>
-                      <option value="staging">Staging</option>
-                    </select>
-                  </Field>
-                  <Field label="Trade markup">{input(draft.deriv.markupRate, value => updateDeriv("markupRate", value), "number", "e.g. 1.5")}</Field>
+
+                <div className="rounded-lg border border-slate-200 p-4 space-y-3">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="text-sm font-semibold text-slate-950">Deriv application</p>
+                      <p className="text-xs text-slate-600">
+                        Use the platform pool (recommended) or bring your own v2 DevHub App.
+                      </p>
+                    </div>
+                    <div className="inline-flex rounded-md border border-slate-300 bg-slate-50 p-0.5 text-xs font-medium">
+                      <button
+                        type="button"
+                        onClick={() => setDerivMode("platform_managed")}
+                        className={`rounded px-2.5 py-1.5 transition ${platformManaged ? "bg-white text-slate-950 shadow-sm" : "text-slate-600 hover:text-slate-900"}`}
+                      >
+                        Platform managed
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setDerivMode("custom")}
+                        className={`rounded px-2.5 py-1.5 transition ${!platformManaged ? "bg-white text-slate-950 shadow-sm" : "text-slate-600 hover:text-slate-900"}`}
+                      >
+                        Custom Deriv app
+                      </button>
+                    </div>
+                  </div>
+
+                  {platformManaged ? (
+                    <div className="space-y-3">
+                      <div className="flex items-start gap-2 rounded-md border border-sky-200 bg-sky-50 p-3 text-xs text-sky-900">
+                        <DerivMark className="mt-0.5 h-4 w-4 shrink-0 text-sky-700" />
+                        <span>
+                          {poolStatus?.poolReady
+                            ? "Assigned automatically from the superuser v2 DevHub App pool. The callback stays on the central DSites endpoint, so traders are attributed to this site even on a custom domain."
+                            : "No pool app is active yet. This site is saved with the requested markup and binds automatically once the superuser pool is populated."}
+                        </span>
+                      </div>
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                          <p className="text-xs text-slate-500">Assigned app</p>
+                          <p className="text-sm font-semibold text-slate-950">{draft.deriv.appId || "Queued for pool"}</p>
+                          <p className="mt-1 text-xs text-slate-500 break-all">OAuth client: {draft.deriv.oauthClientId || "auto"}</p>
+                        </div>
+                        <div className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                          <p className="text-xs text-slate-500">Central callback</p>
+                          <p className="text-xs font-medium text-slate-950 break-all">{CENTRAL_DERIV_CALLBACK_URL}</p>
+                          <p className="mt-1 text-xs text-slate-500">Single-use 60s handoff completes login on this site.</p>
+                        </div>
+                      </div>
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-medium text-slate-800">Commission markup</span>
+                          <span className="font-semibold text-slate-950">{formatMarkupRate(markupValue)}</span>
+                        </div>
+                        <Slider value={[markupValue]} min={0} max={3} step={0.5} onValueChange={values => setMarkupRate(values[0] ?? DEFAULT_MARKUP_RATE)} />
+                      </div>
+                      <div className="grid gap-4 md:grid-cols-2">
+                        <Field label="Environment">
+                          <select className="h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-900 focus:border-sky-600 focus:outline-none focus:ring-2 focus:ring-sky-600/20" value={draft.deriv.environment} onChange={event => updateDeriv("environment", event.target.value)}>
+                            <option value="production">Production</option>
+                            <option value="staging">Staging</option>
+                          </select>
+                        </Field>
+                        <Field label="Owner Deriv account" help="Optional. Paid the owner share of the markup.">{input(draft.deriv.ownerDerivLoginId, value => updateDeriv("ownerDerivLoginId", value.toUpperCase()), "text", "CR1234567")}</Field>
+                      </div>
+                      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 p-3">
+                        <p className="text-xs text-slate-600">
+                          Markup split: <strong className="text-slate-950">{siteOwnerShare}%</strong> site owner · <strong className="text-slate-950">{platformFeeRate}%</strong> platform
+                        </p>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={derivAssignPending}
+                          onClick={() => void syncPlatformDerivApp(draft)}
+                        >
+                          {derivAssignPending ? <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="mr-1.5 h-3.5 w-3.5" />}
+                          Re-sync pool app
+                        </Button>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <Field label="Deriv App ID">{input(draft.deriv.appId, value => updateDeriv("appId", value), "text", "e.g. 68001")}</Field>
+                      <Field label="OAuth client ID">{input(draft.deriv.oauthClientId, value => updateDeriv("oauthClientId", value), "text", "Your v2 OAuth client ID")}</Field>
+                      <Field label="Environment">
+                        <select className="h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-900 focus:border-sky-600 focus:outline-none focus:ring-2 focus:ring-sky-600/20" value={draft.deriv.environment} onChange={event => updateDeriv("environment", event.target.value)}>
+                          <option value="production">Production</option>
+                          <option value="staging">Staging</option>
+                        </select>
+                      </Field>
+                      <Field label="Trade markup">{input(draft.deriv.markupRate, value => updateDeriv("markupRate", value), "number", "e.g. 1.5")}</Field>
+                      <div className="md:col-span-2">
+                        <Field label="Registered callback URL">{input(draft.deriv.callbackUri, value => updateDeriv("callbackUri", value), "text", "https://your-site/api/deriv-oauth-callback")}</Field>
+                      </div>
+                    </div>
+                  )}
                 </div>
+
                 <div className="grid gap-3 md:grid-cols-2">
                   {featureChoices.map(feature => (
                     <div key={feature.key} className="flex justify-between gap-3 rounded-lg border border-slate-200 p-4">
@@ -1544,16 +2125,37 @@ const SiteWizard = () => {
                   <div className="flex items-start gap-2 rounded-md border border-sky-200 bg-sky-50 p-3 text-xs text-sky-900">
                     <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-sky-600" />
                     <span>
-                      Switching domain from <strong>{savedDomainState.hostname}</strong> to{" "}
-                      <strong>{effectiveHostname}</strong>: remember to update the Redirect URL in your Deriv App settings to{" "}
-                      <code>{expectedCallbackUri}</code>.
+                      {platformManaged ? (
+                        <>
+                          Switching domain from <strong>{savedDomainState.hostname}</strong> to{" "}
+                          <strong>{effectiveHostname}</strong>. The platform callback{" "}
+                          <code>{CENTRAL_DERIV_CALLBACK_URL}</code> never changes, so no Deriv dashboard edits are needed.
+                        </>
+                      ) : (
+                        <>
+                          Switching domain from <strong>{savedDomainState.hostname}</strong> to{" "}
+                          <strong>{effectiveHostname}</strong>: remember to update the Redirect URL in your Deriv App settings to{" "}
+                          <code>{expectedCallbackUri}</code>.
+                        </>
+                      )}
+                    </span>
+                  </div>
+                ) : null}
+
+                {platformManaged ? (
+                  <div className="flex items-start gap-2 rounded-md border border-emerald-200 bg-emerald-50 p-3 text-xs text-emerald-900">
+                    <DerivMark className="mt-0.5 h-4 w-4 shrink-0 text-emerald-700" />
+                    <span>
+                      <strong>Platform callback in use.</strong> Traders log in through the central DSites endpoint and are
+                      handed straight back to this site. You do not need to register{" "}
+                      <code>{expectedCallbackUri || "a per-site callback"}</code> anywhere.
                     </span>
                   </div>
                 ) : null}
 
                 {/* Deriv Callback URL + Deployment metadata */}
                 <div className="grid gap-4 md:grid-cols-2">
-                  <div className="md:col-span-2 space-y-1.5">
+                  <div className={`md:col-span-2 space-y-1.5 ${platformManaged ? "hidden" : ""}`}>
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <span className="text-sm font-medium text-slate-900">
                         Exact registered Deriv callback URL

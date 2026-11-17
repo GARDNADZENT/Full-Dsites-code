@@ -8,8 +8,12 @@ export type MarkupRecord = {
   endDate: string;
   currency?: string;
   markupAmount?: number;
+  grossMarkupAmount?: number;
+  superuserFeeAmount?: number;
+  ownerNetAmount?: number;
   tradeCount?: number;
   turnover?: number;
+  sourceType?: "platform_pool" | "custom";
   synchronizedAt: string;
 };
 

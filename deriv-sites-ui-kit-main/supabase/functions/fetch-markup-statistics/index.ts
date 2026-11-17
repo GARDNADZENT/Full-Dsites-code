@@ -382,6 +382,13 @@ Deno.serve(async req => {
     if (days > 366) return json(safeError('date_range_too_large', 'Date range cannot exceed 366 days', id), 400, origin);
 
     let connections: OwnerConnection[] = [];
+    let targetDerivMode = 'platform_managed';
+    let ledgerQuery = admin
+      .from('site_commission_ledger')
+      .select('site_id, deriv_app_id, currency, gross_markup_amount, superuser_fee_amount, owner_net_amount, payout_status, attribution_status, synchronized_at')
+      .gte('traded_at', `${dateFrom}T00:00:00Z`)
+      .lte('traded_at', `${dateTo}T23:59:59.999Z`);
+
     if (adminMode) {
       const { data: canViewFinance } = await admin.rpc('has_platform_permission', { _user_id: auth.user.id, _permission: 'finance.read' });
       if (!canViewFinance) return json(safeError('forbidden', 'Finance read permission is required', id), 403, origin);
@@ -389,17 +396,62 @@ Deno.serve(async req => {
       connections = (data || []) as unknown as OwnerConnection[];
     } else {
       if (!siteId) return json(safeError('site_required', 'Site is required', id), 400, origin);
-      const { data: site } = await admin.from('sites').select('organisation_id').eq('id', siteId).maybeSingle();
+      const { data: site } = await admin.from('sites').select('organisation_id, deriv_mode').eq('id', siteId).maybeSingle();
       if (!site) return json(safeError('site_missing', 'Site was not found', id), 404, origin);
+      targetDerivMode = site.deriv_mode || 'platform_managed';
       const { data: member } = await admin.rpc('is_organisation_member', { _organisation_id: site.organisation_id, _user_id: auth.user.id });
       if (!member) return json(safeError('forbidden', 'You cannot view this site', id), 403, origin);
+      ledgerQuery = ledgerQuery.eq('site_id', siteId);
       const { data } = await admin.from('owner_deriv_connections').select('*, application:deriv_applications(*)').eq('site_id', siteId).eq('owner_user_id', auth.user.id).is('revoked_at', null);
       connections = (data || []) as unknown as OwnerConnection[];
     }
-    if (!connections.length) return json(safeError('deriv_connection_required', 'Connect a Deriv identity with application_read permission', id), 409, origin);
 
     const records: unknown[] = [];
     const errors: Array<{ siteId: string; code: string }> = [];
+
+    // Aggregate platform-managed attributed markup commissions from site_commission_ledger.
+    const { data: ledgerRows } = await ledgerQuery;
+    if (ledgerRows?.length) {
+      const buckets = new Map<string, { siteId: string | null; appId: string; currency: string; gross: number; superuserFee: number; ownerNet: number; trades: number; syncAt: string }>();
+      for (const row of ledgerRows) {
+        const key = `${row.site_id || 'pool'}:${row.deriv_app_id}:${row.currency || 'USD'}`;
+        const cur = buckets.get(key) || {
+          siteId: row.site_id,
+          appId: row.deriv_app_id,
+          currency: row.currency || 'USD',
+          gross: 0,
+          superuserFee: 0,
+          ownerNet: 0,
+          trades: 0,
+          syncAt: row.synchronized_at || new Date().toISOString(),
+        };
+        cur.gross += Number(row.gross_markup_amount || 0);
+        cur.superuserFee += Number(row.superuser_fee_amount || 0);
+        cur.ownerNet += Number(row.owner_net_amount || 0);
+        cur.trades += 1;
+        buckets.set(key, cur);
+      }
+      for (const bucket of buckets.values()) {
+        records.push({
+          siteId: bucket.siteId,
+          derivApplicationId: bucket.appId,
+          startDate: dateFrom,
+          endDate: dateTo,
+          currency: bucket.currency,
+          markupAmount: adminMode ? bucket.gross : bucket.ownerNet,
+          grossMarkupAmount: bucket.gross,
+          superuserFeeAmount: bucket.superuserFee,
+          ownerNetAmount: bucket.ownerNet,
+          tradeCount: bucket.trades,
+          sourceType: 'platform_pool',
+          synchronizedAt: bucket.syncAt,
+        });
+      }
+    }
+
+    if (!connections.length && !records.length && !adminMode && targetDerivMode === 'custom') {
+      return json(safeError('deriv_connection_required', 'Connect a Deriv identity with application_read permission', id), 409, origin);
+    }
     for (const connection of connections) {
       try {
         if (!connection.scopes?.includes('application_read')) throw Object.assign(new Error(), { code: 'scope_missing' });

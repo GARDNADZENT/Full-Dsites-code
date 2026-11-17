@@ -345,6 +345,18 @@ export function buildDerivCallbackUrl(hostname: string): string {
   return normalized ? `https://${normalized}/api/deriv-oauth-callback` : "";
 }
 
+export function isValidPolicyUrl(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith("/") && !trimmed.startsWith("//")) return true;
+  try {
+    const parsed = new URL(trimmed);
+    return parsed.protocol === "https:" || parsed.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
+
 export function getSitePrimaryDomainRecord(
   site: SiteWithDomains | null | undefined,
 ): SiteDomainSummary | null {
@@ -533,6 +545,7 @@ export async function createDraftSite(options: {
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const db = supabase as any;
+  const initialPlan = options.plan || "partnership_monthly";
   const { data: site, error: siteError } = await db
     .from("sites")
     .insert({
@@ -542,6 +555,9 @@ export async function createDraftSite(options: {
       name: inferredName,
       internal_name: inferredName,
       status: "draft",
+      deriv_mode: "platform_managed",
+      requested_markup_rate: 2.5,
+      platform_fee_rate: initialPlan === "one_time" ? 0 : 17,
     })
     .select("id")
     .single();
@@ -551,6 +567,27 @@ export async function createDraftSite(options: {
   }
 
   const siteId = site.id as string;
+
+  // Automatically bind a v2 DevHub App from the superuser pool (or queue until connected).
+  let assignedAppId = "";
+  let assignedOauthClientId = "";
+  let assignedCallbackUri = "";
+  try {
+    const { data: assigned } = await db.rpc("assign_platform_deriv_app_to_site", {
+      _site_id: siteId,
+      _markup_percentage: 2.5,
+      _environment: "production",
+      _scopes: ["trade"],
+      _plan: initialPlan,
+    });
+    if (assigned?.status === "assigned") {
+      assignedAppId = assigned.app_id || "";
+      assignedOauthClientId = assigned.oauth_client_id || "";
+      assignedCallbackUri = assigned.callback_uri || "";
+    }
+  } catch {
+    // Pool auto-assignment is best-effort at draft creation time.
+  }
 
   if (normalizedHostname) {
     try {
@@ -562,84 +599,108 @@ export async function createDraftSite(options: {
     }
   }
 
-  if (options.plan || normalizedHostname || options.domainMode) {
-    const resolvedMode: DomainMode =
-      options.domainMode ||
-      (normalizedHostname
-        ? isVercelAppHostname(normalizedHostname)
-          ? "vercel_subdomain"
-          : options.domainId
-            ? "buy_domain"
-            : "custom_domain"
-        : "vercel_subdomain");
+  const resolvedMode: DomainMode =
+    options.domainMode ||
+    (normalizedHostname
+      ? isVercelAppHostname(normalizedHostname)
+        ? "vercel_subdomain"
+        : options.domainId
+          ? "buy_domain"
+          : "custom_domain"
+      : "vercel_subdomain");
 
-    const callbackUri = normalizedHostname
-      ? buildDerivCallbackUrl(normalizedHostname)
+  const defaultSlug =
+    resolvedMode === "vercel_subdomain"
+      ? extractVercelSlug(normalizedHostname) ||
+        (inferredName !== "Untitled site" ? normalizeVercelSlug(inferredName) : "")
       : "";
+  const effectiveHost =
+    normalizedHostname ||
+    (resolvedMode === "vercel_subdomain" && defaultSlug
+      ? buildVercelHostname(defaultSlug)
+      : "");
 
-    await db.from("site_configurations").insert({
-      organisation_id: organisationId,
-      site_id: siteId,
-      version: 1,
-      schema_version: 1,
-      template_id: "deriv-bot",
-      template_version: "1.0.0",
-      status: "draft",
-      wizard_step: options.plan ? 2 : 1,
-      created_by: options.userId,
-      configuration: {
-        commercial: {
-          plan: options.plan || "partnership_monthly",
-          paymentPhone: "",
-          paymentEmail: options.email || "",
-          acceptedTerms: false,
-        },
-        project: {
-          siteName: inferredName === "Untitled site" ? "" : inferredName,
-          internalName: inferredName === "Untitled site" ? "" : inferredName,
-          description: "",
-          organisationName: "",
-          supportEmail: options.email || "",
-          supportContact: "",
-          language: "en",
-          region: "",
-        },
-        deployment: {
-          domainMode: resolvedMode,
-          subdomain: extractVercelSlug(normalizedHostname),
-          customDomain: normalizedHostname,
-          provider: "vercel",
-          branch: "main",
-          buildCommand: "npm run build",
-          outputDirectory: "dist",
-        },
-        deriv: {
-          appId: "",
-          oauthClientId: "",
-          callbackUri,
-          environment: "production",
-          markupRate: "",
-        },
-      },
-      validation_result: {
-        blocking: [],
-        warnings: [],
-        checkedAt: new Date().toISOString(),
-      },
-    });
+  const callbackUri =
+    assignedCallbackUri ||
+    (effectiveHost
+      ? buildDerivCallbackUrl(effectiveHost)
+      : "https://dsites-admin.vercel.app/api/deriv-oauth-callback");
 
-    if (callbackUri) {
-      await db.from("site_deriv_apps").upsert(
-        {
-          site_id: siteId,
-          redirect_uri: callbackUri,
-          use_legacy_oauth_login: false,
-          include_legacy_app_id_in_oauth: false,
-        },
-        { onConflict: "site_id" },
-      );
-    }
+  await db.from("site_configurations").insert({
+    organisation_id: organisationId,
+    site_id: siteId,
+    version: 1,
+    schema_version: 1,
+    template_id: "deriv-bot",
+    template_version: "1.0.0",
+    status: "draft",
+    wizard_step: options.plan ? 2 : 1,
+    created_by: options.userId,
+    configuration: {
+      commercial: {
+        plan: initialPlan,
+        paymentPhone: "",
+        paymentEmail: options.email || "",
+        acceptedTerms: false,
+      },
+      project: {
+        siteName: inferredName === "Untitled site" ? "" : inferredName,
+        internalName: inferredName === "Untitled site" ? "" : inferredName,
+        description: "",
+        organisationName: "",
+        supportEmail: options.email || "",
+        supportContact: "",
+        language: "en",
+        region: "",
+      },
+      deployment: {
+        domainMode: resolvedMode,
+        subdomain: defaultSlug,
+        customDomain: effectiveHost,
+        provider: "vercel",
+        branch: "main",
+        buildCommand: "npm run build",
+        outputDirectory: "dist",
+      },
+      deriv: {
+        mode: "platform_managed",
+        appId: assignedAppId,
+        oauthClientId: assignedOauthClientId,
+        callbackUri,
+        environment: "production",
+        markupRate: "2.5",
+        ownerDerivLoginId: "",
+        affiliateId: "",
+      },
+      legal: {
+        privacyUrl: "/privacy",
+        termsUrl: "/terms",
+        riskDisclaimer:
+          "Deriv offers complex derivatives, such as options and contracts for difference (CFDs). These products may not be suitable for all clients, and trading them puts you at risk. Never trade with borrowed money or money that you cannot afford to lose.",
+        disclaimerText: "",
+      },
+    },
+    validation_result: {
+      blocking: [],
+      warnings: [],
+      checkedAt: new Date().toISOString(),
+    },
+  });
+
+  if (callbackUri && !assignedAppId) {
+    // No pool app yet: store the requested tier + central callback so the site validates now.
+    await db.from("site_deriv_apps").upsert(
+      {
+        site_id: siteId,
+        redirect_uri: callbackUri,
+        deriv_mode: "platform_managed",
+        markup_percentage: 2.5,
+        use_legacy_oauth_login: false,
+        include_legacy_app_id_in_oauth: false,
+      },
+      { onConflict: "site_id" },
+    );
   }
 
-  return { siteId, organisationId, hostname: normalizedHostname };
+  return { siteId, organisationId, hostname: effectiveHost };
 }

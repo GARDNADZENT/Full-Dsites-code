@@ -19,6 +19,7 @@ import {
   UploadCloud,
 } from "lucide-react";
 import { toast } from "sonner";
+import { supabase } from "@/integrations/supabase/client";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -34,6 +35,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  attachHostnameToSite,
   buildDerivCallbackUrl,
   buildVercelHostname,
   type DomainVerificationRecord,
@@ -42,8 +44,23 @@ import {
   isVercelAppHostname,
   normalizeHostnameInput,
   normalizeVercelSlug,
+  validateCustomHostname,
   VERCEL_SUFFIX,
 } from "@/lib/domain-utils";
+import {
+  assignPlatformDerivAppToSite,
+  CENTRAL_DERIV_CALLBACK_URL,
+  clampMarkupRate,
+  DEFAULT_MARKUP_RATE,
+  formatMarkupRate,
+  getPlatformDerivPoolStatus,
+  getSiteCommissions,
+  MARKUP_PRESETS,
+  ownerShareRate,
+  type PlatformDerivPoolStatus,
+  type SiteCommissionsResponse,
+} from "@/lib/platform-deriv";
+import { Slider } from "@/components/ui/slider";
 import {
   createDraftSiteConfigSnapshot,
   getDefaultSitePages,
@@ -149,6 +166,10 @@ const SiteRuntimeConfig = () => {
   const [customCssVarsText, setCustomCssVarsText] = useState("{}");
   const [manifestForm, setManifestForm] = useState<SiteBotsManifestInput>([]);
   const [showPreview, setShowPreview] = useState(false);
+  const [derivMode, setDerivMode] = useState<"platform_managed" | "custom">("platform_managed");
+  const [derivMarkup, setDerivMarkup] = useState<number>(DEFAULT_MARKUP_RATE);
+  const [platformFeeRate, setPlatformFeeRate] = useState<number>(17);
+  const [poolStatus, setPoolStatus] = useState<PlatformDerivPoolStatus | null>(null);
 
   const { data, isLoading, error } = useQuery({
     queryKey: ["site-runtime-config-admin", siteId],
@@ -173,6 +194,105 @@ const SiteRuntimeConfig = () => {
     queryKey: ["site-integration", siteId],
     queryFn: () => getSiteIntegration(siteId),
     enabled: !!siteId,
+  });
+
+  const commissionsQuery = useQuery({
+    queryKey: ["site-commissions", siteId],
+    queryFn: () => getSiteCommissions(siteId),
+    enabled: !!siteId,
+    retry: 0,
+  });
+  const commissions: SiteCommissionsResponse | undefined = commissionsQuery.data;
+
+  useEffect(() => {
+    getPlatformDerivPoolStatus()
+      .then(setPoolStatus)
+      .catch(() => {
+        /* advisory only */
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!data) return;
+    const siteRecord = data.site as {
+      deriv_mode?: string | null;
+      requested_markup_rate?: number | null;
+      platform_fee_rate?: number | null;
+    };
+    setDerivMode(siteRecord.deriv_mode === "custom" ? "custom" : "platform_managed");
+    setDerivMarkup(clampMarkupRate(siteRecord.requested_markup_rate ?? DEFAULT_MARKUP_RATE));
+    setPlatformFeeRate(Number(siteRecord.platform_fee_rate ?? poolStatus?.defaultPlatformFeeRate ?? 17));
+  }, [data, poolStatus?.defaultPlatformFeeRate]);
+
+  const setDerivModeState = (nextMode: "platform_managed" | "custom") => {
+    setDerivMode(nextMode);
+    setDerivAppForm(prev => ({
+      ...prev,
+      redirect_uri:
+        nextMode === "platform_managed"
+          ? CENTRAL_DERIV_CALLBACK_URL
+          : prev.redirect_uri || (domainForm.hostname ? buildDerivCallbackUrl(domainForm.hostname) : ""),
+    }));
+  };
+
+  const poolAssignMutation = useMutation({
+    mutationFn: async () => {
+      if (domainForm.hostname) {
+        const check = validateCustomHostname(domainForm.hostname);
+        if (check.valid) await attachHostnameToSite(siteId, check.hostname);
+      }
+      return assignPlatformDerivAppToSite({
+        siteId,
+        markupPercentage: derivMarkup,
+        scopes: ["trade"],
+      });
+    },
+    onSuccess: async result => {
+      setDerivAppForm(prev => ({
+        ...prev,
+        deriv_app_id: result.appId || "",
+        oauth_client_id: result.oauthClientId || "",
+        redirect_uri: result.callbackUri || CENTRAL_DERIV_CALLBACK_URL,
+      }));
+      if (result.status === "queued_for_pool") {
+        toast.info("Markup saved — this site binds automatically once the Deriv pool has an app.");
+      } else {
+        toast.success(`Bound ${formatMarkupRate(result.requestedMarkupRate)} pool app ${result.appId}`);
+      }
+      await queryClient.invalidateQueries({ queryKey: ["site-commissions", siteId] });
+      await refreshConfig();
+    },
+    onError: err => toast.error(err instanceof Error ? err.message : "Failed to bind the platform Deriv app"),
+  });
+
+  const derivOwnMutation = useMutation({
+    mutationFn: async () => {
+      // Generated database types lag the superuser pool migration; cast for the new columns.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const db = supabase as any;
+      const { error: siteError } = await db
+        .from("sites")
+        .update({
+          deriv_mode: derivMode,
+          requested_markup_rate: clampMarkupRate(derivMarkup),
+        })
+        .eq("id", siteId);
+      if (siteError) throw siteError;
+      const { error: appError } = await db
+        .from("site_deriv_apps")
+        .update({
+          deriv_mode: derivMode,
+          markup_percentage: clampMarkupRate(derivMarkup),
+        })
+        .eq("site_id", siteId);
+      if (appError) throw appError;
+    },
+    onSuccess: async () => {
+      toast.success(`Deriv mode saved as ${derivMode === "custom" ? "custom app" : "platform managed"}`);
+      await queryClient.invalidateQueries({ queryKey: ["site-commissions", siteId] });
+      await refreshConfig();
+    },
+    onError: err => toast.error(err instanceof Error ? err.message : "Failed to save Deriv mode"),
   });
 
   useEffect(() => {
@@ -218,10 +338,15 @@ const SiteRuntimeConfig = () => {
         : getDefaultSitePages(),
     );
 
+    const loadedMode = ((data.site as { deriv_mode?: string | null }).deriv_mode === "custom")
+      ? "custom"
+      : "platform_managed";
     setDerivAppForm({
       oauth_client_id: data.derivApp?.oauth_client_id || "",
       deriv_app_id: data.derivApp?.deriv_app_id || "",
-      redirect_uri: data.derivApp?.redirect_uri || "",
+      redirect_uri:
+        data.derivApp?.redirect_uri ||
+        (loadedMode === "platform_managed" ? CENTRAL_DERIV_CALLBACK_URL : ""),
       use_legacy_oauth_login: data.derivApp?.use_legacy_oauth_login ?? false,
       include_legacy_app_id_in_oauth: data.derivApp?.include_legacy_app_id_in_oauth ?? false,
     });
@@ -496,6 +621,7 @@ const SiteRuntimeConfig = () => {
     ? `/functions/v1/public-site-config?hostname=${encodeURIComponent(domainForm.hostname)}`
     : null;
   const hasPublicDerivApp = Boolean(derivAppForm.deriv_app_id?.trim() || derivAppForm.oauth_client_id?.trim());
+  const derivNeedsAttention = derivMode === "custom" && !hasPublicDerivApp;
   const domainIsResolvable = domainForm.status === "active" || domainForm.status === "verified";
 
   if (isLoading) {
@@ -581,14 +707,28 @@ const SiteRuntimeConfig = () => {
           </Card>
         ) : null}
 
-        {!hasPublicDerivApp ? (
+        {derivNeedsAttention ? (
           <Card className="bg-amber-500/10 border-amber-500/20 shadow-none">
             <CardContent className="p-4 flex gap-3">
               <AlertTriangle className="w-5 h-5 text-amber-400 mt-0.5" />
               <div>
                 <p className="text-sm font-medium text-foreground">Public Deriv app settings missing</p>
                 <p className="text-xs text-muted-foreground">
-                  Frontend-safe login/app configuration is incomplete until App ID or OAuth client data is added.
+                  This site uses a custom Deriv app, so the App ID and OAuth client ID must be filled in before traders can log in.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        ) : null}
+
+        {derivMode === "platform_managed" && !poolStatus?.poolReady ? (
+          <Card className="bg-blue-500/10 border-blue-500/20 shadow-none">
+            <CardContent className="p-4 flex gap-3">
+              <AlertTriangle className="w-5 h-5 text-blue-400 mt-0.5" />
+              <div>
+                <p className="text-sm font-medium text-foreground">Waiting for the Deriv App pool</p>
+                <p className="text-xs text-muted-foreground">
+                  This site is stored as platform managed with a {formatMarkupRate(derivMarkup)} markup and binds automatically once a superuser pool app exists.
                 </p>
               </div>
             </CardContent>
@@ -1030,53 +1170,188 @@ const SiteRuntimeConfig = () => {
         </TabsContent>
 
         <TabsContent value="deriv">
-          <Card className="bg-panel-bg border-white/10">
-            <CardHeader>
-              <CardTitle className="text-foreground text-lg">Public Deriv App Settings</CardTitle>
-              <CardDescription>
-                This section is for frontend-safe public app settings only. Private API tokens remain in the existing secure setup flow.
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <div className="grid gap-4 md:grid-cols-2">
-                <Field label="OAuth Client ID">
-                  <Input value={derivAppForm.oauth_client_id || ""} onChange={e => setDerivAppForm(prev => ({ ...prev, oauth_client_id: e.target.value }))} />
-                </Field>
-                <Field label="Deriv App ID">
-                  <Input value={derivAppForm.deriv_app_id || ""} onChange={e => setDerivAppForm(prev => ({ ...prev, deriv_app_id: e.target.value }))} />
-                </Field>
-              </div>
-
-              <Field label="Redirect URI">
-                <Input value={derivAppForm.redirect_uri || ""} onChange={e => setDerivAppForm(prev => ({ ...prev, redirect_uri: e.target.value }))} placeholder="https://example.com/" />
-              </Field>
-
-              <div className="grid gap-3 md:grid-cols-2">
-                <div className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 p-4">
-                  <div>
-                    <p className="text-sm font-medium text-foreground">Use legacy OAuth login</p>
-                    <p className="text-xs text-muted-foreground">Keeps compatibility with older login expectations.</p>
+          <div className="space-y-4">
+            <Card className="bg-panel-bg border-white/10">
+              <CardHeader>
+                <CardTitle className="text-foreground text-lg">Deriv App & Markup</CardTitle>
+                <CardDescription>
+                  Run on the superuser v2 DevHub App pool (recommended) or bring your own Deriv app. Deriv allows a 0%–3% markup.
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="inline-flex rounded-lg border border-white/10 bg-white/5 p-0.5 text-xs font-medium">
+                    <button
+                      type="button"
+                      onClick={() => setDerivModeState("platform_managed")}
+                      className={`rounded-md px-3 py-1.5 transition ${derivMode === "platform_managed" ? "bg-primary/20 text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                    >
+                      Platform managed
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDerivModeState("custom")}
+                      className={`rounded-md px-3 py-1.5 transition ${derivMode === "custom" ? "bg-primary/20 text-foreground" : "text-muted-foreground hover:text-foreground"}`}
+                    >
+                      Custom Deriv app
+                    </button>
                   </div>
-                  <Switch checked={derivAppForm.use_legacy_oauth_login ?? false} onCheckedChange={checked => setDerivAppForm(prev => ({ ...prev, use_legacy_oauth_login: checked }))} />
+                  <span className={`rounded-full px-2.5 py-0.5 text-[11px] font-medium ${poolStatus?.poolReady ? "bg-emerald-500/20 text-emerald-300" : "bg-amber-500/20 text-amber-300"}`}>
+                    {poolStatus?.poolReady
+                      ? `${poolStatus.activeAppCount} pool app${poolStatus.activeAppCount === 1 ? "" : "s"} ready`
+                      : "Pool not populated yet"}
+                  </span>
                 </div>
 
-                <div className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 p-4">
-                  <div>
-                    <p className="text-sm font-medium text-foreground">Include legacy app ID in OAuth</p>
-                    <p className="text-xs text-muted-foreground">Only use this if an existing frontend requires it.</p>
-                  </div>
-                  <Switch checked={derivAppForm.include_legacy_app_id_in_oauth ?? false} onCheckedChange={checked => setDerivAppForm(prev => ({ ...prev, include_legacy_app_id_in_oauth: checked }))} />
-                </div>
-              </div>
+                {derivMode === "platform_managed" ? (
+                  <div className="space-y-4">
+                    <div className="grid gap-3 md:grid-cols-3">
+                      <div className="rounded-lg border border-white/10 bg-white/5 p-4">
+                        <p className="text-xs text-muted-foreground">Assigned app ID</p>
+                        <p className="text-sm font-semibold text-foreground break-all">{derivAppForm.deriv_app_id || "Queued for pool"}</p>
+                      </div>
+                      <div className="rounded-lg border border-white/10 bg-white/5 p-4">
+                        <p className="text-xs text-muted-foreground">Applied markup</p>
+                        <p className="text-sm font-semibold text-foreground">{formatMarkupRate(commissions?.site.appliedMarkupRate ?? derivMarkup)}</p>
+                      </div>
+                      <div className="rounded-lg border border-white/10 bg-white/5 p-4">
+                        <p className="text-xs text-muted-foreground">Owner / platform split</p>
+                        <p className="text-sm font-semibold text-foreground">
+                          {ownerShareRate(platformFeeRate)}% / {platformFeeRate}%
+                        </p>
+                      </div>
+                    </div>
 
-              <div className="flex justify-end">
-                <Button onClick={() => derivMutation.mutate()} disabled={derivMutation.isPending}>
-                  <Save className="w-4 h-4 mr-2" />
-                  {derivMutation.isPending ? "Saving..." : "Save Deriv Settings"}
-                </Button>
-              </div>
-            </CardContent>
-          </Card>
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between text-xs">
+                        <span className="text-muted-foreground">Requested commission markup</span>
+                        <span className="font-semibold text-foreground">{formatMarkupRate(derivMarkup)}</span>
+                      </div>
+                      <Slider value={[derivMarkup]} min={0} max={3} step={0.5} onValueChange={values => setDerivMarkup(clampMarkupRate(values[0] ?? DEFAULT_MARKUP_RATE))} />
+                      <div className="flex flex-wrap gap-1.5">
+                        {MARKUP_PRESETS.map(preset => (
+                          <button
+                            key={preset}
+                            type="button"
+                            onClick={() => setDerivMarkup(preset)}
+                            className={`rounded-full border px-2.5 py-1 text-xs transition ${Math.abs(derivMarkup - preset) < 0.001 ? "border-primary/60 bg-primary/20 text-foreground" : "border-white/10 bg-white/5 text-muted-foreground hover:text-foreground"}`}
+                          >
+                            {formatMarkupRate(preset)}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="rounded-lg border border-white/10 bg-white/5 p-3 text-xs text-muted-foreground space-y-1">
+                      <p>Central callback: <code className="text-foreground break-all">{CENTRAL_DERIV_CALLBACK_URL}</code></p>
+                      <p>Traders are attributed to this site even on a custom domain, via a single-use 60 second handoff.</p>
+                    </div>
+
+                    <div className="flex flex-wrap justify-end gap-2">
+                      <Button variant="outline" onClick={() => poolAssignMutation.mutate()} disabled={poolAssignMutation.isPending}>
+                        {poolAssignMutation.isPending ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-2" />}
+                        {poolAssignMutation.isPending ? "Binding..." : "Save markup & bind pool app"}
+                      </Button>
+                      <Button onClick={() => derivOwnMutation.mutate()} disabled={derivOwnMutation.isPending}>
+                        <Save className="w-4 h-4 mr-2" />
+                        {derivOwnMutation.isPending ? "Saving..." : "Save Deriv settings"}
+                      </Button>
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    <div className="grid gap-4 md:grid-cols-2">
+                      <Field label="OAuth Client ID">
+                        <Input value={derivAppForm.oauth_client_id || ""} onChange={e => setDerivAppForm(prev => ({ ...prev, oauth_client_id: e.target.value }))} />
+                      </Field>
+                      <Field label="Deriv App ID">
+                        <Input value={derivAppForm.deriv_app_id || ""} onChange={e => setDerivAppForm(prev => ({ ...prev, deriv_app_id: e.target.value }))} />
+                      </Field>
+                    </div>
+
+                    <Field label="Redirect URI">
+                      <Input value={derivAppForm.redirect_uri || ""} onChange={e => setDerivAppForm(prev => ({ ...prev, redirect_uri: e.target.value }))} placeholder="https://example.com/api/deriv-oauth-callback" />
+                    </Field>
+
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <div className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 p-4">
+                        <div>
+                          <p className="text-sm font-medium text-foreground">Use legacy OAuth login</p>
+                          <p className="text-xs text-muted-foreground">Keeps compatibility with older login expectations.</p>
+                        </div>
+                        <Switch checked={derivAppForm.use_legacy_oauth_login ?? false} onCheckedChange={checked => setDerivAppForm(prev => ({ ...prev, use_legacy_oauth_login: checked }))} />
+                      </div>
+
+                      <div className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 p-4">
+                        <div>
+                          <p className="text-sm font-medium text-foreground">Include legacy app ID in OAuth</p>
+                          <p className="text-xs text-muted-foreground">Only use this if an existing frontend requires it.</p>
+                        </div>
+                        <Switch checked={derivAppForm.include_legacy_app_id_in_oauth ?? false} onCheckedChange={checked => setDerivAppForm(prev => ({ ...prev, include_legacy_app_id_in_oauth: checked }))} />
+                      </div>
+                    </div>
+
+                    <div className="flex justify-end">
+                      <Button onClick={() => derivMutation.mutate()} disabled={derivMutation.isPending}>
+                        <Save className="w-4 h-4 mr-2" />
+                        {derivMutation.isPending ? "Saving..." : "Save Deriv Settings"}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card className="bg-panel-bg border-white/10">
+              <CardHeader>
+                <CardTitle className="text-foreground text-lg flex items-center gap-2">
+                  <Sparkles className="w-5 h-5 text-primary" />
+                  Commission split
+                </CardTitle>
+                <CardDescription>Gross Deriv markup, the platform fee withheld, and the site owner's net share.</CardDescription>
+              </CardHeader>
+              <CardContent className="space-y-4">
+                {commissionsQuery.isLoading ? (
+                  <div className="h-24 rounded-xl bg-white/5 animate-pulse" />
+                ) : commissionsQuery.error ? (
+                  <p className="text-sm text-amber-400">{commissionsQuery.error instanceof Error ? commissionsQuery.error.message : "Commission summary unavailable"}</p>
+                ) : !commissions?.currencies?.length ? (
+                  <p className="text-sm text-muted-foreground">
+                    No attributed trades yet. Figures appear after the superuser runs a Deriv commission sync.
+                  </p>
+                ) : (
+                  <>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      {commissions.currencies.map(row => (
+                        <div key={row.currency} className="rounded-lg border border-white/10 bg-white/5 p-4 space-y-1">
+                          <p className="text-xs text-muted-foreground">{row.currency} · {row.tradeCount} trades</p>
+                          <p className="text-lg font-semibold text-foreground">Gross {row.grossMarkup.toLocaleString(undefined, { maximumFractionDigits: 2 })}</p>
+                          <p className="text-xs text-muted-foreground">Platform fee {row.platformFee.toLocaleString(undefined, { maximumFractionDigits: 2 })}</p>
+                          <p className="text-xs text-emerald-400">Owner net {row.ownerNet.toLocaleString(undefined, { maximumFractionDigits: 2 })}</p>
+                          <p className="text-xs text-muted-foreground">Pending {row.pendingAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })} · Paid {row.paidAmount.toLocaleString(undefined, { maximumFractionDigits: 2 })}</p>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Attributed traders: {commissions.traders.real} real · {commissions.traders.demo} demo
+                    </p>
+                    {commissions.recentTrades.length > 0 ? (
+                      <div className="space-y-2">
+                        {commissions.recentTrades.slice(0, 8).map(trade => (
+                          <div key={trade.id} className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-white/10 bg-white/5 px-3 py-2 text-xs">
+                            <span className="text-muted-foreground">{new Date(trade.tradedAt).toLocaleString()} · {trade.trader}</span>
+                            <span className="text-foreground">
+                              {trade.currency} {trade.grossMarkup.toFixed(4)} gross · owner {trade.ownerNet.toFixed(4)} · {trade.payoutStatus}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                  </>
+                )}
+              </CardContent>
+            </Card>
+          </div>
         </TabsContent>
 
         <TabsContent value="bots">

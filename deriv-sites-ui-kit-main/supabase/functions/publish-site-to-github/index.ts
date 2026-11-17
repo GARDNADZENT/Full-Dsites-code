@@ -438,8 +438,38 @@ Deno.serve(async (req) => {
     if (configuration.data?.status === "invalid") {
       return jsonResponse({ error: "The current site configuration has blocking validation errors" }, 409);
     }
-    if (configuration.data && (!modernDerivApp.data || !domain.data?.hostname)) {
-      return jsonResponse({ error: "A domain and complete Deriv application are required before publishing" }, 409);
+
+    // For DForge-style platform_managed sites, auto-assign the closest active superuser v2 DevHub App.
+    let resolvedDerivApplication = modernDerivApp.data;
+    const isPlatformManaged =
+      site.deriv_mode !== "custom" &&
+      (configuration.data?.configuration as Record<string, Record<string, unknown>> | undefined)?.deriv?.mode !== "custom";
+
+    if (isPlatformManaged) {
+      const desiredMarkup = Number(
+        (configuration.data?.configuration as Record<string, Record<string, unknown>> | undefined)?.deriv?.markupRate ??
+          site.requested_markup_rate ??
+          2.5,
+      );
+      await admin.rpc("assign_platform_deriv_app_to_site", {
+        _site_id: siteId,
+        _markup_percentage: Number.isFinite(desiredMarkup) ? desiredMarkup : 2.5,
+        _environment: "production",
+        _scopes: ["trade", "account_manage"],
+      });
+      const refreshed = await admin
+        .from("deriv_applications")
+        .select("*")
+        .eq("site_id", siteId)
+        .maybeSingle();
+      resolvedDerivApplication = refreshed.data;
+    }
+
+    if (configuration.data && !domain.data?.hostname) {
+      return jsonResponse({ error: "A domain or free .vercel.app subdomain is required before publishing" }, 409);
+    }
+    if (configuration.data && !isPlatformManaged && !resolvedDerivApplication) {
+      return jsonResponse({ error: "Custom Deriv App ID, OAuth Client ID, and Callback URL are required when using a custom Deriv App" }, 409);
     }
 
     const version = (latestVersion.data?.[0]?.version_number ?? 0) + 1;
@@ -465,7 +495,7 @@ Deno.serve(async (req) => {
     )
       .trim()
       .toLowerCase();
-    const traderScopes = (modernDerivApp.data?.configured_scopes || ["trade"]).filter((scope: string) => scope !== "application_read");
+    const traderScopes = (resolvedDerivApplication?.configured_scopes || ["trade"]).filter((scope: string) => scope !== "application_read");
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let publicConfig: Record<string, any> = {
       schemaVersion: 1,
@@ -496,11 +526,13 @@ Deno.serve(async (req) => {
         customCssVars: settings.data?.custom_css_vars_json || {},
       },
       deriv: {
-        oauthClientId: modernDerivApp.data?.oauth_client_id || derivApp.data?.oauth_client_id || undefined,
-        appId: modernDerivApp.data?.app_id || derivApp.data?.deriv_app_id || undefined,
+        oauthClientId: resolvedDerivApplication?.oauth_client_id || derivApp.data?.oauth_client_id || undefined,
+        appId: resolvedDerivApplication?.app_id || derivApp.data?.deriv_app_id || undefined,
         gatewayUrl,
-        requiredScopes: traderScopes,
-        environment: modernDerivApp.data?.environment || "production",
+        requiredScopes: traderScopes.length ? traderScopes : ["trade"],
+        environment: resolvedDerivApplication?.environment || "production",
+        managedByPlatform: isPlatformManaged,
+        markupPercentage: Number(draft?.deriv?.markupRate ?? site.requested_markup_rate ?? 2.5),
       },
       features: draft?.features || (features.data
         ? {
