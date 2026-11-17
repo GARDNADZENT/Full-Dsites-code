@@ -296,11 +296,16 @@ const validateDraft = (draft: WizardDraft): ValidationIssue[] => {
   return issues;
 };
 
+const formatColorLabel = (key: string) =>
+  key
+    .replace(/([A-Z])/g, " $1")
+    .replace(/^./, char => char.toUpperCase());
+
 const Field = ({ label, children, help }: { label: string; children: React.ReactNode; help?: string }) => (
   <label className="block space-y-1.5">
-    <span className="text-sm font-medium text-foreground">{label}</span>
+    <span className="block text-sm font-medium text-slate-800">{label}</span>
     {children}
-    {help ? <span className="block text-xs leading-5 text-muted-foreground">{help}</span> : null}
+    {help ? <span className="block text-xs leading-5 text-slate-600">{help}</span> : null}
   </label>
 );
 
@@ -653,7 +658,20 @@ const SiteWizard = () => {
     }
   };
 
-  const input = (value: string, onChange: (value: string) => void, type = "text") => <Input type={type} value={value} onChange={event => onChange(event.target.value)} />;
+  const input = (
+    value: string,
+    onChange: (value: string) => void,
+    type = "text",
+    placeholder?: string,
+  ) => (
+    <Input
+      type={type}
+      value={value}
+      placeholder={placeholder}
+      onChange={event => onChange(event.target.value)}
+      className="border-slate-300 bg-white text-slate-900 placeholder:text-slate-400 focus-visible:border-sky-600 focus-visible:ring-sky-600/20"
+    />
+  );
 
   const importBots = async (files: FileList | null) => {
     if (!files?.length) return;
@@ -885,23 +903,29 @@ const SiteWizard = () => {
     }
   };
 
-  if (loading) return <div className="flex-1 grid place-items-center"><Loader2 className="w-7 h-7 animate-spin" /></div>;
+  if (loading) {
+    return (
+      <div className="light-surface flex-1 grid place-items-center bg-slate-50 text-slate-700">
+        <Loader2 className="w-7 h-7 animate-spin text-sky-700" />
+      </div>
+    );
+  }
 
   return (
-    <div className="flex-1 bg-slate-50 text-slate-950">
+    <div className="light-surface flex-1 bg-slate-50 text-slate-950">
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-8">
         <div className="flex flex-col gap-4 border-b border-slate-200 pb-5 lg:flex-row lg:items-center lg:justify-between">
           <div className="flex items-start gap-3">
-            <Button variant="ghost" size="icon" onClick={() => navigate(-1)} className="mt-1">
+            <Button variant="ghost" size="icon" onClick={() => navigate(-1)} className="mt-1 text-slate-700 hover:bg-slate-200/70 hover:text-slate-950">
               <ArrowLeft className="h-4 w-4" />
             </Button>
             <div>
               <h1 className="text-2xl font-semibold tracking-normal text-slate-950">Customer site wizard</h1>
-              <p className="mt-1 text-sm text-slate-500">Version {configurationVersion}. Build the site first, collect payment at the end, then publish to GitHub and Vercel.</p>
+              <p className="mt-1 text-sm text-slate-600">Version {configurationVersion}. Build the site first, collect payment at the end, then publish to GitHub and Vercel.</p>
             </div>
           </div>
           <div className="rounded-md border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm">
-            <span className="text-slate-500">Selected plan</span>
+            <span className="text-slate-600">Selected plan</span>
             <div className="font-semibold text-slate-950">{selectedPlan.title} · {selectedPlan.price}</div>
           </div>
         </div>
@@ -915,9 +939,9 @@ const SiteWizard = () => {
                 <button
                   key={item.label}
                   onClick={() => setStep(index + 1)}
-                  className={`flex w-full items-center gap-3 rounded-md border px-3 py-3 text-left text-sm transition ${active ? "border-sky-500 bg-white text-slate-950 shadow-sm" : index + 1 < step ? "border-emerald-200 bg-emerald-50 text-emerald-800" : "border-slate-200 bg-white text-slate-500 hover:text-slate-950"}`}
+                  className={`flex w-full items-center gap-3 rounded-md border px-3 py-3 text-left text-sm transition ${active ? "border-sky-600 bg-sky-50/70 text-slate-950 shadow-sm ring-1 ring-sky-600/20" : index + 1 < step ? "border-emerald-200 bg-emerald-50 text-emerald-900 hover:border-emerald-300" : "border-slate-200 bg-white text-slate-700 hover:border-slate-300 hover:bg-slate-50 hover:text-slate-950"}`}
                 >
-                  <Icon className="h-4 w-4" />
+                  <Icon className={`h-4 w-4 shrink-0 ${active ? "text-sky-700" : index + 1 < step ? "text-emerald-700" : "text-slate-500"}`} />
                   <span className="font-medium">{item.label}</span>
                 </button>
               );
@@ -928,8 +952,8 @@ const SiteWizard = () => {
             {step === 1 ? (
               <section className="space-y-5">
                 <div>
-                  <h2 className="text-xl font-semibold">Choose how this site pays</h2>
-                  <p className="mt-1 text-sm text-slate-500">Every customer chooses one of these two models, and payment is handled after configuration review.</p>
+                  <h2 className="text-xl font-semibold text-slate-950">Choose how this site pays</h2>
+                  <p className="mt-1 text-sm text-slate-600">Every customer chooses one of these two models, and payment is handled after configuration review.</p>
                 </div>
                 <div className="grid gap-4 md:grid-cols-2">
                   {[
@@ -962,19 +986,26 @@ const SiteWizard = () => {
             {step === 2 ? (
               <section className="space-y-5">
                 <div>
-                  <h2 className="text-xl font-semibold">Name the business</h2>
-                  <p className="mt-1 text-sm text-slate-500">This becomes the public identity for the customer site and the internal record for your manager.</p>
+                  <h2 className="text-xl font-semibold text-slate-950">Name the business</h2>
+                  <p className="mt-1 text-sm text-slate-600">This becomes the public identity for the customer site and the internal record for your manager.</p>
                 </div>
                 <div className="grid gap-4 md:grid-cols-2">
-                  <Field label="Site name">{input(draft.project.siteName, value => updateProject("siteName", value))}</Field>
-                  <Field label="Internal project name">{input(draft.project.internalName, value => updateProject("internalName", value))}</Field>
-                  <Field label="Owner or organisation">{input(draft.project.organisationName, value => updateProject("organisationName", value))}</Field>
-                  <Field label="Support email">{input(draft.project.supportEmail, value => updateProject("supportEmail", value), "email")}</Field>
-                  <Field label="Support contact">{input(draft.project.supportContact, value => updateProject("supportContact", value))}</Field>
-                  <Field label="Default language">{input(draft.project.language, value => updateProject("language", value))}</Field>
-                  <Field label="Target region">{input(draft.project.region, value => updateProject("region", value))}</Field>
+                  <Field label="Site name">{input(draft.project.siteName, value => updateProject("siteName", value), "text", "e.g. Apex Traders Hub")}</Field>
+                  <Field label="Internal project name">{input(draft.project.internalName, value => updateProject("internalName", value), "text", "e.g. apex-traders")}</Field>
+                  <Field label="Owner or organisation">{input(draft.project.organisationName, value => updateProject("organisationName", value), "text", "e.g. Apex Trading Group")}</Field>
+                  <Field label="Support email">{input(draft.project.supportEmail, value => updateProject("supportEmail", value), "email", "support@yourdomain.com")}</Field>
+                  <Field label="Support contact">{input(draft.project.supportContact, value => updateProject("supportContact", value), "text", "+254 712 345 678 or @telegram")}</Field>
+                  <Field label="Default language">{input(draft.project.language, value => updateProject("language", value), "text", "en")}</Field>
+                  <Field label="Target region">{input(draft.project.region, value => updateProject("region", value), "text", "e.g. Kenya / Global")}</Field>
                 </div>
-                <Field label="Description"><textarea className="min-h-24 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm" value={draft.project.description} onChange={event => updateProject("description", event.target.value)} /></Field>
+                <Field label="Description">
+                  <textarea
+                    className="min-h-24 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-sky-600 focus:outline-none focus:ring-2 focus:ring-sky-600/20"
+                    placeholder="Briefly describe your trading community, bots, and education offering..."
+                    value={draft.project.description}
+                    onChange={event => updateProject("description", event.target.value)}
+                  />
+                </Field>
               </section>
             ) : null}
 
@@ -982,25 +1013,25 @@ const SiteWizard = () => {
               <section className="grid gap-6 xl:grid-cols-[1fr_420px]">
                 <div className="space-y-5">
                   <div>
-                    <h2 className="text-xl font-semibold">Set colors and preview</h2>
-                    <p className="mt-1 text-sm text-slate-500">Pick the public theme before domain setup so the user sees the brand taking shape early.</p>
+                    <h2 className="text-xl font-semibold text-slate-950">Set colors and preview</h2>
+                    <p className="mt-1 text-sm text-slate-600">Pick the public theme before domain setup so the user sees the brand taking shape early.</p>
                   </div>
                   <div className="grid gap-4 md:grid-cols-2">
                     {(["primaryColor", "secondaryColor", "accentColor", "backgroundColor", "surfaceColor", "textColor"] as const).map(key => (
-                      <Field key={key} label={key.replace(/([A-Z])/g, " $1")}>
+                      <Field key={key} label={formatColorLabel(key)}>
                         <div className="flex gap-2">
-                          <Input type="color" className="h-10 w-14 p-1" value={draft.branding[key]} onChange={event => updateBranding(key, event.target.value)} />
-                          {input(draft.branding[key], value => updateBranding(key, value))}
+                          <Input type="color" className="h-10 w-14 cursor-pointer border-slate-300 bg-white p-1" value={draft.branding[key]} onChange={event => updateBranding(key, event.target.value)} />
+                          {input(draft.branding[key], value => updateBranding(key, value), "text", "#0ea5e9")}
                         </div>
                       </Field>
                     ))}
-                    <Field label="Site title">{input(draft.branding.siteTitle, value => updateBranding("siteTitle", value))}</Field>
-                    <Field label="Logo URL">{input(draft.branding.logoUrl, value => updateBranding("logoUrl", value))}</Field>
-                    <Field label="Typography">{input(draft.branding.typography, value => updateBranding("typography", value))}</Field>
-                    <Field label="Border radius">{input(draft.branding.borderRadius, value => updateBranding("borderRadius", value))}</Field>
+                    <Field label="Site title">{input(draft.branding.siteTitle, value => updateBranding("siteTitle", value), "text", "e.g. Apex Traders — Automated Bots")}</Field>
+                    <Field label="Logo URL">{input(draft.branding.logoUrl, value => updateBranding("logoUrl", value), "text", "https://example.com/logo.png")}</Field>
+                    <Field label="Typography">{input(draft.branding.typography, value => updateBranding("typography", value), "text", "Inter")}</Field>
+                    <Field label="Border radius">{input(draft.branding.borderRadius, value => updateBranding("borderRadius", value), "text", "12px")}</Field>
                   </div>
-                  <div className="flex items-center justify-between rounded-md border border-slate-200 p-3">
-                    <span className="text-sm">Show Powered by Deriv attribution</span>
+                  <div className="flex items-center justify-between rounded-md border border-slate-200 bg-slate-50/70 p-3">
+                    <span className="text-sm font-medium text-slate-800">Show Powered by Deriv attribution</span>
                     <Switch checked={draft.branding.poweredByDeriv} onCheckedChange={value => updateBranding("poweredByDeriv", value)} />
                   </div>
                 </div>
@@ -1076,9 +1107,9 @@ const SiteWizard = () => {
                   ) : draft.bots.map((bot, index) => (
                     <div key={bot.id} className="grid gap-3 rounded-lg border border-slate-200 p-4 md:grid-cols-[auto_1fr_1fr_auto] md:items-center">
                       <Switch checked={bot.isActive} onCheckedChange={isActive => setDraft(current => ({ ...current, bots: current.bots.map(row => row.id === bot.id ? { ...row, isActive } : row) }))} />
-                      <Input value={bot.name} onChange={event => setDraft(current => ({ ...current, bots: current.bots.map(row => row.id === bot.id ? { ...row, name: event.target.value } : row) }))} />
-                      <Input value={bot.description} onChange={event => setDraft(current => ({ ...current, bots: current.bots.map(row => row.id === bot.id ? { ...row, description: event.target.value } : row) }))} />
-                      <Button variant="ghost" onClick={() => setDraft(current => ({ ...current, bots: current.bots.filter(row => row.id !== bot.id).map((row, rowIndex) => ({ ...row, displayOrder: rowIndex })) }))}>Remove</Button>
+                      <Input className="border-slate-300 bg-white text-slate-900 placeholder:text-slate-400" placeholder="Bot name" value={bot.name} onChange={event => setDraft(current => ({ ...current, bots: current.bots.map(row => row.id === bot.id ? { ...row, name: event.target.value } : row) }))} />
+                      <Input className="border-slate-300 bg-white text-slate-900 placeholder:text-slate-400" placeholder="Bot description" value={bot.description} onChange={event => setDraft(current => ({ ...current, bots: current.bots.map(row => row.id === bot.id ? { ...row, description: event.target.value } : row) }))} />
+                      <Button variant="ghost" className="text-red-700 hover:bg-red-50 hover:text-red-800" onClick={() => setDraft(current => ({ ...current, bots: current.bots.filter(row => row.id !== bot.id).map((row, rowIndex) => ({ ...row, displayOrder: rowIndex })) }))}>Remove</Button>
                       <span className="text-xs text-slate-500 md:col-start-2">Free Bots position {index + 1} · {bot.fileName}</span>
                     </div>
                   ))}
@@ -1093,15 +1124,15 @@ const SiteWizard = () => {
                   <p className="mt-1 text-sm text-slate-500">Select only the tools the site needs. Required Deriv scopes update automatically.</p>
                 </div>
                 <div className="grid gap-4 md:grid-cols-2">
-                  <Field label="Deriv App ID">{input(draft.deriv.appId, value => updateDeriv("appId", value))}</Field>
-                  <Field label="OAuth client ID">{input(draft.deriv.oauthClientId, value => updateDeriv("oauthClientId", value))}</Field>
+                  <Field label="Deriv App ID">{input(draft.deriv.appId, value => updateDeriv("appId", value), "text", "e.g. 68001")}</Field>
+                  <Field label="OAuth client ID">{input(draft.deriv.oauthClientId, value => updateDeriv("oauthClientId", value), "text", "Optional OAuth client ID")}</Field>
                   <Field label="Environment">
-                    <select className="h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm" value={draft.deriv.environment} onChange={event => updateDeriv("environment", event.target.value)}>
+                    <select className="h-10 w-full rounded-md border border-slate-300 bg-white px-3 text-sm text-slate-900 focus:border-sky-600 focus:outline-none focus:ring-2 focus:ring-sky-600/20" value={draft.deriv.environment} onChange={event => updateDeriv("environment", event.target.value)}>
                       <option value="production">Production</option>
                       <option value="staging">Staging</option>
                     </select>
                   </Field>
-                  <Field label="Trade markup">{input(draft.deriv.markupRate, value => updateDeriv("markupRate", value), "number")}</Field>
+                  <Field label="Trade markup">{input(draft.deriv.markupRate, value => updateDeriv("markupRate", value), "number", "e.g. 1.5")}</Field>
                 </div>
                 <div className="grid gap-3 md:grid-cols-2">
                   {featureChoices.map(feature => (
@@ -1583,16 +1614,23 @@ const SiteWizard = () => {
                   <p className="mt-1 text-sm text-slate-500">Free Bots, privacy and terms stay enabled because they are part of the public site contract.</p>
                 </div>
                 <div className="grid gap-4 md:grid-cols-2">
-                  <Field label="Privacy policy URL">{input(draft.legal.privacyUrl, value => setDraft(current => ({ ...current, legal: { ...current.legal, privacyUrl: value } })))}</Field>
-                  <Field label="Terms URL">{input(draft.legal.termsUrl, value => setDraft(current => ({ ...current, legal: { ...current.legal, termsUrl: value } })))}</Field>
+                  <Field label="Privacy policy URL">{input(draft.legal.privacyUrl, value => setDraft(current => ({ ...current, legal: { ...current.legal, privacyUrl: value } })), "text", "https://yourdomain.com/privacy")}</Field>
+                  <Field label="Terms URL">{input(draft.legal.termsUrl, value => setDraft(current => ({ ...current, legal: { ...current.legal, termsUrl: value } })), "text", "https://yourdomain.com/terms")}</Field>
                 </div>
-                <Field label="Risk disclaimer"><textarea className="min-h-24 w-full rounded-md border border-slate-200 bg-white px-3 py-2 text-sm" value={draft.legal.riskDisclaimer} onChange={event => setDraft(current => ({ ...current, legal: { ...current.legal, riskDisclaimer: event.target.value } }))} /></Field>
+                <Field label="Risk disclaimer">
+                  <textarea
+                    className="min-h-24 w-full rounded-md border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder:text-slate-400 focus:border-sky-600 focus:outline-none focus:ring-2 focus:ring-sky-600/20"
+                    placeholder="Derivatives trading carries substantial risk of loss and may not be suitable for all investors..."
+                    value={draft.legal.riskDisclaimer}
+                    onChange={event => setDraft(current => ({ ...current, legal: { ...current.legal, riskDisclaimer: event.target.value } }))}
+                  />
+                </Field>
                 <div className="grid gap-3">
                   {draft.navigation.map((item, index) => (
-                    <div key={item.key} className="grid grid-cols-[auto_1fr_1fr] items-center gap-3 rounded-md border border-slate-200 p-3">
+                    <div key={item.key} className="grid grid-cols-[auto_1fr_1fr] items-center gap-3 rounded-md border border-slate-200 bg-slate-50/50 p-3">
                       <Switch checked={item.enabled} disabled={["privacy", "terms", "free_bots"].includes(item.key)} onCheckedChange={enabled => setDraft(current => ({ ...current, navigation: current.navigation.map((row, rowIndex) => rowIndex === index ? { ...row, enabled } : row) }))} />
-                      <Input value={item.label} onChange={event => setDraft(current => ({ ...current, navigation: current.navigation.map((row, rowIndex) => rowIndex === index ? { ...row, label: event.target.value } : row) }))} />
-                      <Input value={item.slug} onChange={event => setDraft(current => ({ ...current, navigation: current.navigation.map((row, rowIndex) => rowIndex === index ? { ...row, slug: event.target.value } : row) }))} />
+                      <Input className="border-slate-300 bg-white text-slate-900" value={item.label} onChange={event => setDraft(current => ({ ...current, navigation: current.navigation.map((row, rowIndex) => rowIndex === index ? { ...row, label: event.target.value } : row) }))} />
+                      <Input className="border-slate-300 bg-white text-slate-900" value={item.slug} onChange={event => setDraft(current => ({ ...current, navigation: current.navigation.map((row, rowIndex) => rowIndex === index ? { ...row, slug: event.target.value } : row) }))} />
                     </div>
                   ))}
                 </div>
@@ -1634,11 +1672,11 @@ const SiteWizard = () => {
                   </div>
                 </div>
                 <div className="grid gap-4 md:grid-cols-2">
-                  <Field label="Payment email">{input(draft.commercial.paymentEmail, value => updateCommercial("paymentEmail", value), "email")}</Field>
-                  <Field label="M-Pesa phone number">{input(draft.commercial.paymentPhone, value => updateCommercial("paymentPhone", value), "tel")}</Field>
+                  <Field label="Payment email">{input(draft.commercial.paymentEmail, value => updateCommercial("paymentEmail", value), "email", "billing@yourdomain.com")}</Field>
+                  <Field label="M-Pesa phone number">{input(draft.commercial.paymentPhone, value => updateCommercial("paymentPhone", value), "tel", "0712 345 678")}</Field>
                 </div>
-                <label className="flex items-start gap-3 rounded-md border border-slate-200 p-4 text-sm">
-                  <input type="checkbox" checked={draft.commercial.acceptedTerms} onChange={event => updateCommercial("acceptedTerms", event.target.checked)} className="mt-1" />
+                <label className="flex cursor-pointer items-start gap-3 rounded-md border border-slate-200 bg-slate-50/60 p-4 text-sm text-slate-800">
+                  <input type="checkbox" checked={draft.commercial.acceptedTerms} onChange={event => updateCommercial("acceptedTerms", event.target.checked)} className="mt-1 h-4 w-4 accent-sky-700" />
                   <span>I confirm the customer has accepted the {selectedPlan.title.toLowerCase()} payment terms and the site should be published after payment confirmation.</span>
                 </label>
                 <div className="space-y-2">
@@ -1654,11 +1692,42 @@ const SiteWizard = () => {
           </main>
         </div>
 
-        <div className="mt-6 flex justify-between">
-          <Button variant="outline" disabled={step === 1} onClick={() => setStep(value => Math.max(1, value - 1))}><ArrowLeft className="mr-2 h-4 w-4" />Back</Button>
-          <div className="flex gap-2">
-            <Button variant="ghost" disabled={saving} onClick={() => saveDraft(step).catch(() => {})}>{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}<span className="ml-2">Save draft</span></Button>
-            {step < steps.length ? <Button disabled={saving} onClick={async () => { try { await saveDraft(step + 1); setStep(value => Math.min(steps.length, value + 1)); } catch { /* toast already shown */ } }}>Continue<ArrowRight className="ml-2 h-4 w-4" /></Button> : null}
+        <div className="mt-6 flex flex-wrap items-center justify-between gap-3">
+          <Button
+            variant="outline"
+            className="border-slate-300 bg-white text-slate-900 hover:bg-slate-100 hover:text-slate-950"
+            disabled={step === 1}
+            onClick={() => setStep(value => Math.max(1, value - 1))}
+          >
+            <ArrowLeft className="mr-2 h-4 w-4" />
+            Back
+          </Button>
+          <div className="flex flex-wrap items-center gap-2">
+            <Button
+              variant="outline"
+              className="border-slate-300 bg-white text-slate-800 hover:bg-slate-100 hover:text-slate-950"
+              disabled={saving}
+              onClick={() => saveDraft(step).catch(() => {})}
+            >
+              {saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+              <span className="ml-2">Save draft</span>
+            </Button>
+            {step < steps.length ? (
+              <Button
+                disabled={saving}
+                onClick={async () => {
+                  try {
+                    await saveDraft(step + 1);
+                    setStep(value => Math.min(steps.length, value + 1));
+                  } catch {
+                    /* toast already shown */
+                  }
+                }}
+              >
+                Continue
+                <ArrowRight className="ml-2 h-4 w-4" />
+              </Button>
+            ) : null}
           </div>
         </div>
       </div>

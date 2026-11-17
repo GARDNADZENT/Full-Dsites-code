@@ -65,7 +65,7 @@ const DerivSitesOnboarding = () => {
   };
 
   return (
-    <div className="flex-1 bg-slate-50 px-4 pb-10 text-slate-950 sm:px-6 lg:px-8">
+    <div className="light-surface flex-1 bg-slate-50 px-4 pb-10 text-slate-950 sm:px-6 lg:px-8">
       <div className="mx-auto max-w-5xl pt-6">
         <Button variant="ghost" onClick={() => navigate("/")} className="mb-4">
           <ArrowLeft className="mr-2 h-4 w-4" />

@@ -84,25 +84,26 @@
   }
 
   .dark {
+    color-scheme: dark;
     --background: 222 47% 11%;
     --foreground: 210 40% 98%;
-    --card: 217 32% 17%;
+    --card: 220 39% 14%;
     --card-foreground: 210 40% 98%;
-    --popover: 215 24% 26%;
+    --popover: 220 39% 15%;
     --popover-foreground: 210 40% 98%;
-    --primary: 198 93% 59%;
-    --primary-foreground: 204 80% 15%;
-    --secondary: 212 26% 83%;
-    --secondary-foreground: 228 84% 4%;
-    --muted: 215 16% 46%;
-    --muted-foreground: 210 40% 98%;
-    --accent: 228 84% 4%;
-    --accent-foreground: 215 20% 65%;
-    --destructive: 0 84% 60%;
-    --destructive-foreground: 0 85% 97%;
-    --border: 215 19% 34%;
-    --input: 215 19% 34%;
-    --ring: 198 93% 59%;
+    --primary: 199 89% 56%;
+    --primary-foreground: 222 47% 9%;
+    --secondary: 217 33% 20%;
+    --secondary-foreground: 210 40% 98%;
+    --muted: 217 33% 19%;
+    --muted-foreground: 215 20% 72%;
+    --accent: 217 33% 22%;
+    --accent-foreground: 210 40% 98%;
+    --destructive: 0 72% 48%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 217 28% 26%;
+    --input: 217 28% 30%;
+    --ring: 199 89% 56%;
     --chart-1: 199 95% 73%;
     --chart-2: 211 96% 78%;
     --chart-3: 215 20% 65%;
@@ -110,12 +111,12 @@
     --chart-5: 215 19% 34%;
     --sidebar: 217 32% 17%;
     --sidebar-foreground: 210 40% 98%;
-    --sidebar-primary: 198 93% 59%;
-    --sidebar-primary-foreground: 204 80% 15%;
-    --sidebar-accent: 215 20% 65%;
-    --sidebar-accent-foreground: 228 84% 4%;
-    --sidebar-border: 215 19% 34%;
-    --sidebar-ring: 198 93% 59%;
+    --sidebar-primary: 199 89% 56%;
+    --sidebar-primary-foreground: 222 47% 9%;
+    --sidebar-accent: 217 33% 22%;
+    --sidebar-accent-foreground: 210 40% 98%;
+    --sidebar-border: 217 28% 22%;
+    --sidebar-ring: 199 89% 56%;
     --shadow-2xs: 0 1px 3px 0px hsl(0 0% 0% / 0.05);
     --shadow-xs: 0 1px 3px 0px hsl(0 0% 0% / 0.05);
     --shadow-sm: 0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 1px 2px -1px hsl(0 0% 0% / 0.1);
@@ -124,6 +125,31 @@
     --shadow-lg: 0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 4px 6px -1px hsl(0 0% 0% / 0.1);
     --shadow-xl: 0 1px 3px 0px hsl(0 0% 0% / 0.1), 0 8px 10px -1px hsl(0 0% 0% / 0.1);
     --shadow-2xl: 0 1px 3px 0px hsl(0 0% 0% / 0.25);
+  }
+
+  /* Scoped light design tokens for light-surface pages inside the dark shell */
+  .light-surface,
+  .dark .light-surface {
+    color-scheme: light;
+    --background: 0 0% 100%;
+    --foreground: 222 47% 11%;
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+    --primary: 201 96% 32%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 210 40% 95%;
+    --secondary-foreground: 222 47% 11%;
+    --muted: 210 40% 95%;
+    --muted-foreground: 215 19% 38%;
+    --accent: 210 40% 94%;
+    --accent-foreground: 222 47% 11%;
+    --destructive: 0 72% 48%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 214 32% 84%;
+    --input: 214 32% 78%;
+    --ring: 200 98% 39%;
   }
 }
 
@@ -142,6 +168,29 @@
     @apply bg-background text-foreground;
     background: linear-gradient(180deg, hsl(var(--page-bg-start)) 0%, hsl(var(--page-bg-end)) 100%);
     min-height: 100vh;
+  }
+
+  /* Keep browser-autofilled fields readable on both dark and light surfaces */
+  .dark input:-webkit-autofill,
+  .dark input:-webkit-autofill:hover,
+  .dark input:-webkit-autofill:focus,
+  .dark textarea:-webkit-autofill {
+    -webkit-text-fill-color: hsl(210 40% 98%);
+    -webkit-box-shadow: 0 0 0 1000px hsl(222 47% 11%) inset;
+    caret-color: hsl(210 40% 98%);
+  }
+
+  .light-surface input:-webkit-autofill,
+  .light-surface input:-webkit-autofill:hover,
+  .light-surface input:-webkit-autofill:focus,
+  .light-surface textarea:-webkit-autofill,
+  .dark .light-surface input:-webkit-autofill,
+  .dark .light-surface input:-webkit-autofill:hover,
+  .dark .light-surface input:-webkit-autofill:focus,
+  .dark .light-surface textarea:-webkit-autofill {
+    -webkit-text-fill-color: hsl(222 47% 11%);
+    -webkit-box-shadow: 0 0 0 1000px hsl(0 0% 100%) inset;
+    caret-color: hsl(222 47% 11%);
   }
 }
 
@@ -182,7 +231,7 @@
 
 @layer components {
   .btn-primary {
-    @apply gradient-purple text-foreground font-medium rounded-full px-5 py-2.5 transition-all duration-200;
+    @apply gradient-purple text-white font-medium rounded-full px-5 py-2.5 transition-all duration-200;
   }
 
   .btn-primary:hover {

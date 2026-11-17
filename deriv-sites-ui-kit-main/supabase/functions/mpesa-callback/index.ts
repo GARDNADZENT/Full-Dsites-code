@@ -1,7 +1,6 @@
-import { serve } from "https://deno.land/std@0.190.0/http/server.ts";
-import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { encode as hexEncode } from "https://deno.land/std@0.190.0/encoding/hex.ts";
+import { createClient } from "npm:@supabase/supabase-js@2";
 
+const hexEncode = (bytes: Uint8Array) => new TextEncoder().encode(Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join(""));
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type, x-lipana-signature',
@@ -574,4 +573,4 @@ const handler = async (req: Request): Promise<Response> => {
   }
 };
 
-serve(handler);
+Deno.serve(handler);
