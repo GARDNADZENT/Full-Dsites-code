@@ -888,13 +888,7 @@ Deno.serve(async (req) => {
         try {
           await ws.request({
             app_update: Number(appId),
-            // app_update inherits Deriv's app_register rules: no "deriv" in the name, max 48 chars.
-            name:
-              name
-                .replace(/deriv/gi, "DSites")
-                .replace(/[^a-zA-Z0-9 _-]/g, "")
-                .trim()
-                .slice(0, 48) || "DSites Pool",
+            name: name.slice(0, 48),
             scopes: ["read", "trade", "trading_information", "payments", "admin"],
             redirect_uri: callbackUri,
             verification_uri: DEFAULT_VERIFICATION_URI,
@@ -912,8 +906,7 @@ Deno.serve(async (req) => {
           .from("platform_deriv_apps")
           .update({ is_default: false })
           .eq("environment", environment)
-          .eq("is_default", true)
-          .neq("app_id", appId);
+          .eq("is_default", true);
       }
 
       const rowPayload: Record<string, unknown> = {
@@ -933,14 +926,6 @@ Deno.serve(async (req) => {
       if (clientSecret) {
         rowPayload.client_secret_encrypted = await encryptSecret(clientSecret);
       }
-      if (!isDefault) {
-        // Inherit the existing default so a plain edit never clears the pool default.
-        const { data: currentRow } = id
-          ? await admin.from("platform_deriv_apps").select("is_default").eq("id", id).maybeSingle()
-          : { data: null };
-        if (currentRow?.is_default) rowPayload.is_default = true;
-      }
-
       if (!id) {
         rowPayload.created_by = user.id;
         rowPayload.registration_source = "manual";
