@@ -161,6 +161,26 @@ const AdminDerivAppPool = () => {
       return `${result.paidCount} ledger rows marked paid (${formatAmount(result.totalPaid, currency)})`;
     });
 
+  const toggleApp = (app: PlatformPoolApp) =>
+    run(`toggle:${app.id}`, async () => {
+      await upsertPoolApp({
+        id: app.id,
+        appId: app.appId,
+        oauthClientId: app.oauthClientId,
+        name: app.name,
+        markupPercentage: app.markupPercentage,
+        callbackUri: app.callbackUri,
+        environment: app.environment,
+        configuredScopes: app.configuredScopes,
+        legacyAppId: app.legacyAppId || undefined,
+        notes: app.notes || undefined,
+        isActive: !app.isActive,
+        // The Edge Function clears competing defaults whenever isDefault is true.
+        isDefault: app.isDefault ? !app.isActive : false,
+      });
+      return `${app.appId} ${app.isActive ? "deactivated" : "activated"}`;
+    });
+
   const removeApp = (app: PlatformPoolApp) =>
     run(`delete:${app.id}`, async () => {
       await deletePoolApp(app.id);
@@ -370,22 +390,8 @@ const AdminDerivAppPool = () => {
                     <Button
                       variant="outline"
                       size="sm"
-                      onClick={() =>
-                        run(`toggle:${app.id}`, async () => {
-                          await upsertPoolApp({
-                            id: app.id,
-                            appId: app.appId,
-                            oauthClientId: app.oauthClientId,
-                            name: app.name,
-                            markupPercentage: app.markupPercentage,
-                            callbackUri: app.callbackUri,
-                            environment: app.environment,
-                            isActive: !app.isActive,
-                            isDefault: app.isDefault,
-                          });
-                          return `${app.appId} ${app.isActive ? "deactivated" : "activated"}`;
-                        })
-                      }
+                      onClick={() => void toggleApp(app)}
+                      disabled={busy === `toggle:${app.id}`}
                     >
                       {app.isActive ? "Deactivate" : "Activate"}
                     </Button>
