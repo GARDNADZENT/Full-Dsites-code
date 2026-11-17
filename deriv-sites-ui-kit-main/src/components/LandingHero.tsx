@@ -22,7 +22,7 @@ const workflow = [
   { icon: CreditCard, title: "Choose plan", text: "Pick 17% monthly partnership or KES 25,000 one-time." },
   { icon: Palette, title: "Design the site", text: "Set colors, branding and preview the public trader experience." },
   { icon: Bot, title: "Import free bots", text: "Upload XML bots that appear on the Free Bots page." },
-  { icon: Globe, title: "Configure domain", text: "Set the domain, callback URL and deploy through Vercel." },
+  { icon: Globe, title: "Flexible domain", text: "Launch on a free .vercel.app subdomain, connect a domain you own, or buy a new one." },
 ];
 
 const LandingHero = ({ onGetStarted }: LandingHeroProps) => {

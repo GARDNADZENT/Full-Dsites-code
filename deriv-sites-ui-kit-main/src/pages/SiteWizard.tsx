@@ -7,12 +7,18 @@ import {
   Bot,
   Check,
   CheckCircle2,
+  Copy,
   CreditCard,
+  ExternalLink,
   Eye,
   Globe,
+  Link2,
   Loader2,
   Palette,
+  RefreshCw,
   Save,
+  ShoppingCart,
+  Sparkles,
   Upload,
   Wand2,
 } from "lucide-react";
@@ -26,6 +32,26 @@ import { TEMPLATE_REGISTRY } from "@reef-sites/template-registry";
 import type { DerivFeature, ValidationIssue } from "@reef-sites/shared-types";
 import { toast } from "sonner";
 import AdminMarkupStats from "@/components/AdminMarkupStats";
+import BuyDomainDialog from "@/components/BuyDomainDialog";
+import {
+  attachHostnameToSite,
+  buildDerivCallbackUrl,
+  buildVercelHostname,
+  type DomainMode,
+  type DomainVerificationRecord,
+  extractVercelSlug,
+  getRequiredDnsRecords,
+  isVercelAppHostname,
+  normalizeHostnameInput,
+  normalizeVercelSlug,
+  validateCustomHostname,
+  validateVercelSlug,
+  VERCEL_SUFFIX,
+} from "@/lib/domain-utils";
+import {
+  ProvisionDomainError,
+  provisionSiteDomain,
+} from "@/lib/site-runtime-config";
 
 type CommercialPlan = "partnership_monthly" | "one_time";
 
@@ -59,6 +85,7 @@ type WizardDraft = {
     region: string;
   };
   deployment: {
+    domainMode: DomainMode;
     subdomain: string;
     customDomain: string;
     provider: "vercel" | "netlify";
@@ -115,7 +142,7 @@ const steps = [
 const initialDraft = (): WizardDraft => ({
   commercial: { plan: "partnership_monthly", paymentPhone: "", paymentEmail: "", acceptedTerms: false },
   project: { siteName: "", internalName: "", description: "", organisationName: "", supportEmail: "", supportContact: "", language: "en", region: "" },
-  deployment: { subdomain: "", customDomain: "", provider: "vercel", branch: "main", buildCommand: "npm run build", outputDirectory: "dist" },
+  deployment: { domainMode: "vercel_subdomain", subdomain: "", customDomain: "", provider: "vercel", branch: "main", buildCommand: "npm run build", outputDirectory: "dist" },
   branding: {
     primaryColor: "#0ea5e9",
     secondaryColor: "#111827",
@@ -146,18 +173,52 @@ const initialDraft = (): WizardDraft => ({
   legal: { privacyUrl: "", termsUrl: "", riskDisclaimer: "", disclaimerText: "" },
 });
 
+const getEffectiveHostname = (deployment: WizardDraft["deployment"]): string => {
+  if (deployment.domainMode === "vercel_subdomain") {
+    return buildVercelHostname(deployment.subdomain || deployment.customDomain);
+  }
+  return normalizeHostnameInput(deployment.customDomain);
+};
+
 const normalizeDraft = (value: Partial<WizardDraft>): WizardDraft => {
   const fallback = initialDraft();
   const navigation = Array.isArray(value.navigation) ? [...value.navigation] : [...fallback.navigation];
   for (const mandatory of fallback.navigation.filter(item => ["privacy", "terms", "free_bots"].includes(item.key))) {
     if (!navigation.some(item => item.key === mandatory.key)) navigation.push(mandatory);
   }
+  const rawDeployment = {
+    ...fallback.deployment,
+    ...value.deployment,
+    provider: "vercel" as const,
+  };
+  const normalizedCustom = normalizeHostnameInput(rawDeployment.customDomain || "");
+  const inferredMode: DomainMode =
+    value.deployment?.domainMode ||
+    (normalizedCustom
+      ? isVercelAppHostname(normalizedCustom)
+        ? "vercel_subdomain"
+        : "custom_domain"
+      : "vercel_subdomain");
+  const inferredSlug =
+    inferredMode === "vercel_subdomain"
+      ? normalizeVercelSlug(rawDeployment.subdomain || normalizedCustom)
+      : rawDeployment.subdomain || "";
+  const syncedCustomDomain =
+    inferredMode === "vercel_subdomain"
+      ? buildVercelHostname(inferredSlug)
+      : normalizedCustom;
+
   return {
     ...fallback,
     ...value,
     commercial: { ...fallback.commercial, ...value.commercial },
     project: { ...fallback.project, ...value.project },
-    deployment: { ...fallback.deployment, ...value.deployment, provider: "vercel" },
+    deployment: {
+      ...rawDeployment,
+      domainMode: inferredMode,
+      subdomain: inferredSlug,
+      customDomain: syncedCustomDomain,
+    },
     branding: { ...fallback.branding, ...value.branding },
     template: { ...fallback.template, ...value.template },
     deriv: { ...fallback.deriv, ...value.deriv },
@@ -169,7 +230,6 @@ const normalizeDraft = (value: Partial<WizardDraft>): WizardDraft => {
 };
 
 const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const hostnamePattern = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$/i;
 const phonePattern = /^(\+?254|0)?[17]\d{8}$/;
 
 const validateDraft = (draft: WizardDraft): ValidationIssue[] => {
@@ -179,12 +239,34 @@ const validateDraft = (draft: WizardDraft): ValidationIssue[] => {
 
   if (draft.project.siteName.trim().length < 2) block("site_name_missing", "Site name is required.", "project.siteName");
   if (!emailPattern.test(draft.project.supportEmail)) block("support_email_invalid", "A valid support email is required.", "project.supportEmail");
-  if (!hostnamePattern.test(draft.deployment.customDomain)) block("domain_invalid", "Enter a valid custom domain.", "deployment.customDomain");
+
+  const effectiveDomain = getEffectiveHostname(draft.deployment);
+  if (draft.deployment.domainMode === "vercel_subdomain") {
+    const check = validateVercelSlug(draft.deployment.subdomain || draft.deployment.customDomain);
+    if (!check.valid) {
+      block("domain_invalid", check.error || "Choose a valid free .vercel.app subdomain.", "deployment.subdomain");
+    }
+  } else if (draft.deployment.domainMode === "buy_domain") {
+    const check = validateCustomHostname(draft.deployment.customDomain);
+    if (!check.valid) {
+      block(
+        "domain_invalid",
+        "Purchase a domain in Step 7, or switch to Free Vercel URL / Connect Existing Domain.",
+        "deployment.customDomain",
+      );
+    }
+  } else {
+    const check = validateCustomHostname(draft.deployment.customDomain);
+    if (!check.valid) {
+      block("domain_invalid", check.error || "Enter a valid domain you own.", "deployment.customDomain");
+    }
+  }
+
   if (!draft.deriv.appId.trim()) block("deriv_app_id_missing", "Deriv App ID is required.", "deriv.appId");
   if (!draft.deriv.oauthClientId.trim()) block("oauth_client_missing", "Deriv OAuth client ID is required.", "deriv.oauthClientId");
   try {
     const callback = new URL(draft.deriv.callbackUri);
-    const expected = draft.deployment.customDomain ? `https://${draft.deployment.customDomain.toLowerCase()}/api/deriv-oauth-callback` : "";
+    const expected = effectiveDomain ? buildDerivCallbackUrl(effectiveDomain) : "";
     if (callback.protocol !== "https:" || (expected && callback.toString() !== expected)) {
       block("callback_invalid", `Register and enter the exact callback URL: ${expected || "https://your-domain/api/deriv-oauth-callback"}`, "deriv.callbackUri");
     }
@@ -233,7 +315,28 @@ const SiteWizard = () => {
   const [configurationVersion, setConfigurationVersion] = useState(1);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [buyDialogOpen, setBuyDialogOpen] = useState(false);
+  const [savedDomainState, setSavedDomainState] = useState<{
+    hostname: string;
+    status: string;
+    isVerified: boolean;
+  } | null>(null);
+  const [domainActionPending, setDomainActionPending] = useState<false | "attach" | "verify">(false);
+  const [vercelVerification, setVercelVerification] = useState<DomainVerificationRecord[]>([]);
+  const [slugSuggestions, setSlugSuggestions] = useState<string[]>([]);
   const replayingPublish = useRef(false);
+  const effectiveHostname = useMemo(() => getEffectiveHostname(draft.deployment), [draft.deployment]);
+  const expectedCallbackUri = useMemo(
+    () => (effectiveHostname ? buildDerivCallbackUrl(effectiveHostname) : ""),
+    [effectiveHostname],
+  );
+  const dnsInstructions = useMemo(
+    () =>
+      draft.deployment.domainMode !== "vercel_subdomain" && effectiveHostname
+        ? getRequiredDnsRecords(effectiveHostname, vercelVerification)
+        : [],
+    [draft.deployment.domainMode, effectiveHostname, vercelVerification],
+  );
   const issues = useMemo(() => validateDraft(draft), [draft]);
   const displayIssues = step < 10 ? issues.filter(issue => !issue.field?.startsWith("commercial.")) : issues;
   const requiredScopes = useMemo(() => requiredScopesForFeatures(
@@ -255,28 +358,76 @@ const SiteWizard = () => {
         const { data: site, error } = await db.from("sites").select("*").eq("id", siteId).single();
         if (error) throw error;
         setOrganisationId(site.organisation_id);
-        const { data: configuration } = await db.from("site_configurations").select("*").eq("site_id", siteId).in("status", ["draft", "invalid", "valid"]).order("version", { ascending: false }).limit(1).maybeSingle();
+        const [{ data: configuration }, { data: primaryDomain }] = await Promise.all([
+          db.from("site_configurations").select("*").eq("site_id", siteId).in("status", ["draft", "invalid", "valid"]).order("version", { ascending: false }).limit(1).maybeSingle(),
+          db.from("site_domains").select("*").eq("site_id", siteId).order("is_primary", { ascending: false }).limit(1).maybeSingle(),
+        ]);
+
+        if (primaryDomain?.hostname) {
+          setSavedDomainState({
+            hostname: primaryDomain.hostname.toLowerCase(),
+            status: primaryDomain.status || "pending",
+            isVerified: Boolean(primaryDomain.is_verified),
+          });
+        }
+
         if (configuration?.configuration) {
-          setDraft(normalizeDraft(configuration.configuration));
+          const loaded = normalizeDraft(configuration.configuration);
+          // Keep wizard in sync if the user updated their domain from the Domains page.
+          if (primaryDomain?.hostname) {
+            const dbHost = primaryDomain.hostname.toLowerCase();
+            if (isVercelAppHostname(dbHost)) {
+              loaded.deployment.domainMode = "vercel_subdomain";
+              loaded.deployment.subdomain = extractVercelSlug(dbHost);
+              loaded.deployment.customDomain = dbHost;
+            } else {
+              loaded.deployment.domainMode = site.domain_id ? "buy_domain" : "custom_domain";
+              loaded.deployment.customDomain = dbHost;
+            }
+            if (!loaded.deriv.callbackUri) {
+              loaded.deriv.callbackUri = buildDerivCallbackUrl(dbHost);
+            }
+          }
+          setDraft(loaded);
           setConfigurationId(configuration.id);
           setConfigurationVersion(configuration.version);
           setStep(Math.min(configuration.wizard_step || 1, steps.length));
         } else {
-          const [settings, domain, derivApp, bots, latestConfiguration] = await Promise.all([
+          const [settings, derivApp, bots, latestConfiguration] = await Promise.all([
             db.from("site_settings").select("*").eq("site_id", siteId).maybeSingle(),
-            db.from("site_domains").select("*").eq("site_id", siteId).order("is_primary", { ascending: false }).limit(1).maybeSingle(),
             db.from("site_deriv_apps").select("*").eq("site_id", siteId).maybeSingle(),
             db.from("site_bots_manifest").select("*").eq("site_id", siteId).order("display_order", { ascending: true }),
             db.from("site_configurations").select("version").eq("site_id", siteId).order("version", { ascending: false }).limit(1).maybeSingle(),
           ]);
+          const dbHost = (primaryDomain?.hostname || "").toLowerCase();
+          const initialMode: DomainMode = dbHost
+            ? isVercelAppHostname(dbHost)
+              ? "vercel_subdomain"
+              : site.domain_id
+                ? "buy_domain"
+                : "custom_domain"
+            : "vercel_subdomain";
           setConfigurationVersion((latestConfiguration.data?.version || 0) + 1);
           setDraft(current => ({
             ...current,
-            project: { ...current.project, siteName: settings.data?.site_name || site.name, internalName: site.internal_name || site.name, description: site.description || "", language: site.default_language || "en", region: site.target_region || "" },
-            deployment: { ...current.deployment, customDomain: domain.data?.hostname || "" },
+            project: {
+              ...current.project,
+              siteName: settings.data?.site_name || (site.name === "Untitled site" ? "" : site.name),
+              internalName: site.internal_name || (site.name === "Untitled site" ? "" : site.name),
+              supportEmail: current.project.supportEmail || user.email || "",
+              description: site.description || "",
+              language: site.default_language || "en",
+              region: site.target_region || "",
+            },
+            deployment: {
+              ...current.deployment,
+              domainMode: initialMode,
+              subdomain: isVercelAppHostname(dbHost) ? extractVercelSlug(dbHost) : "",
+              customDomain: dbHost,
+            },
             branding: {
               ...current.branding,
-              siteTitle: settings.data?.site_name || site.name,
+              siteTitle: settings.data?.site_name || (site.name === "Untitled site" ? "" : site.name),
               primaryColor: settings.data?.primary_color || current.branding.primaryColor,
               secondaryColor: settings.data?.secondary_color || current.branding.secondaryColor,
               accentColor: settings.data?.accent_color || current.branding.accentColor,
@@ -286,7 +437,13 @@ const SiteWizard = () => {
               backgroundColor: settings.data?.custom_css_vars_json?.["--site-background"] || current.branding.backgroundColor,
               textColor: settings.data?.custom_css_vars_json?.["--site-text"] || current.branding.textColor,
             },
-            deriv: { ...current.deriv, appId: derivApp.data?.deriv_app_id || "", oauthClientId: derivApp.data?.oauth_client_id || "", callbackUri: derivApp.data?.redirect_uri || "" },
+            deriv: {
+              ...current.deriv,
+              appId: derivApp.data?.deriv_app_id || "",
+              oauthClientId: derivApp.data?.oauth_client_id || "",
+              callbackUri:
+                derivApp.data?.redirect_uri || (dbHost ? buildDerivCallbackUrl(dbHost) : ""),
+            },
             bots: (bots.data || []).map((bot: { id: string; bot_id?: string | null; display_name: string; description?: string | null; file_path?: string | null; category?: string | null; display_order?: number | null; is_active?: boolean | null }, index: number) => ({
               id: bot.bot_id || bot.id,
               name: bot.display_name,
@@ -312,6 +469,190 @@ const SiteWizard = () => {
   const updateBranding = (key: keyof WizardDraft["branding"], value: string | boolean) => setDraft(current => ({ ...current, branding: { ...current.branding, [key]: value } }));
   const updateDeriv = (key: keyof WizardDraft["deriv"], value: string) => setDraft(current => ({ ...current, deriv: { ...current.deriv, [key]: value } }));
   const updateCommercial = (key: keyof WizardDraft["commercial"], value: string | boolean) => setDraft(current => ({ ...current, commercial: { ...current.commercial, [key]: value } }));
+
+  const syncCallbackForNextHost = (prevHost: string, nextHost: string, currentCallback: string) => {
+    const prevExpected = prevHost ? buildDerivCallbackUrl(prevHost) : "";
+    const nextExpected = nextHost ? buildDerivCallbackUrl(nextHost) : "";
+    if (!currentCallback.trim() || currentCallback.trim() === prevExpected) {
+      return nextExpected;
+    }
+    return currentCallback;
+  };
+
+  const selectDomainMode = (mode: DomainMode) => {
+    setSlugSuggestions([]);
+    setVercelVerification([]);
+    setDraft(current => {
+      const prevHost = getEffectiveHostname(current.deployment);
+      if (mode === "vercel_subdomain") {
+        const nextSlug =
+          current.deployment.subdomain ||
+          extractVercelSlug(current.deployment.customDomain) ||
+          normalizeVercelSlug(current.project.siteName);
+        const nextHost = buildVercelHostname(nextSlug);
+        return {
+          ...current,
+          deployment: {
+            ...current.deployment,
+            domainMode: mode,
+            subdomain: nextSlug,
+            customDomain: nextHost,
+          },
+          deriv: {
+            ...current.deriv,
+            callbackUri: syncCallbackForNextHost(prevHost, nextHost, current.deriv.callbackUri),
+          },
+        };
+      }
+      const nextCustom = isVercelAppHostname(current.deployment.customDomain)
+        ? ""
+        : current.deployment.customDomain;
+      return {
+        ...current,
+        deployment: {
+          ...current.deployment,
+          domainMode: mode,
+          customDomain: nextCustom,
+        },
+        deriv: {
+          ...current.deriv,
+          callbackUri: nextCustom
+            ? syncCallbackForNextHost(prevHost, nextCustom, current.deriv.callbackUri)
+            : current.deriv.callbackUri,
+        },
+      };
+    });
+  };
+
+  const handleVercelSlugChange = (rawValue: string) => {
+    const cleanedSlug = rawValue
+      .toLowerCase()
+      .replace(/\.vercel\.app$/i, "")
+      .replace(/[^a-z0-9-]/g, "-")
+      .replace(/-{2,}/g, "-")
+      .slice(0, 63);
+    setSlugSuggestions([]);
+    setDraft(current => {
+      const prevHost = getEffectiveHostname(current.deployment);
+      const nextHost = buildVercelHostname(cleanedSlug);
+      return {
+        ...current,
+        deployment: {
+          ...current.deployment,
+          domainMode: "vercel_subdomain",
+          subdomain: cleanedSlug,
+          customDomain: nextHost,
+        },
+        deriv: {
+          ...current.deriv,
+          callbackUri: syncCallbackForNextHost(prevHost, nextHost, current.deriv.callbackUri),
+        },
+      };
+    });
+  };
+
+  const handleCustomDomainChange = (rawValue: string, normalize = false) => {
+    const nextValue = normalize ? normalizeHostnameInput(rawValue) : rawValue.toLowerCase();
+    setVercelVerification([]);
+    setDraft(current => {
+      const prevHost = getEffectiveHostname(current.deployment);
+      const nextNormalized = normalizeHostnameInput(nextValue);
+      return {
+        ...current,
+        deployment: {
+          ...current.deployment,
+          customDomain: nextValue,
+        },
+        deriv: {
+          ...current.deriv,
+          callbackUri: syncCallbackForNextHost(
+            prevHost,
+            nextNormalized,
+            current.deriv.callbackUri,
+          ),
+        },
+      };
+    });
+  };
+
+  const handleVerifyOrAttachDomain = async (action: "attach" | "verify") => {
+    const mode = draft.deployment.domainMode;
+    const validation =
+      mode === "vercel_subdomain"
+        ? validateVercelSlug(draft.deployment.subdomain || draft.deployment.customDomain)
+        : validateCustomHostname(draft.deployment.customDomain);
+
+    if (!validation.valid || !validation.hostname) {
+      toast.error(validation.error || "Enter a valid domain first");
+      return;
+    }
+
+    setDomainActionPending(action);
+    setSlugSuggestions([]);
+
+    try {
+      const attachedLocal = await attachHostnameToSite(siteId, validation.hostname);
+      setSavedDomainState({
+        hostname: attachedLocal.hostname,
+        status: attachedLocal.status,
+        isVerified: attachedLocal.is_verified,
+      });
+
+      const result = await provisionSiteDomain(siteId, {
+        action,
+        hostname: validation.hostname,
+      });
+
+      if (result.domainVerification.length) {
+        setVercelVerification(result.domainVerification);
+      } else {
+        setVercelVerification([]);
+      }
+
+      if (result.domain) {
+        setSavedDomainState({
+          hostname: result.domain.hostname,
+          status: result.domain.status,
+          isVerified: result.domain.isVerified,
+        });
+      }
+
+      if (result.domain?.isVerified) {
+        toast.success(
+          result.domain.isVercelSubdomain
+            ? `https://${result.domain.hostname} is claimed and active on Vercel!`
+            : `${result.domain.hostname} DNS is verified and SSL is ready!`,
+        );
+      } else if (result.domainVerification.length > 0) {
+        toast.info(
+          "Add the TXT verification record and DNS record shown below at your registrar, then click Verify DNS.",
+        );
+      } else {
+        toast.info(
+          "Domain attached on Vercel. Add the DNS record below at your registrar, wait a few minutes, then click Verify DNS.",
+        );
+      }
+    } catch (error) {
+      if (error instanceof ProvisionDomainError && error.suggestions.length) {
+        setSlugSuggestions(error.suggestions);
+      }
+      toast.error(
+        error instanceof Error ? error.message : "Unable to verify domain on Vercel",
+      );
+    } finally {
+      setDomainActionPending(false);
+    }
+  };
+
+  const copyToClipboard = async (value: string, label = "Copied") => {
+    try {
+      await navigator.clipboard.writeText(value);
+      toast.success(label);
+    } catch {
+      toast.error("Unable to copy");
+    }
+  };
+
   const input = (value: string, onChange: (value: string) => void, type = "text") => <Input type={type} value={value} onChange={event => onChange(event.target.value)} />;
 
   const importBots = async (files: FileList | null) => {
@@ -346,18 +687,26 @@ const SiteWizard = () => {
       // Generated database types are refreshed only after the migration is applied.
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const db = supabase as any;
-      const draftIssues = validateDraft(draftToSave);
-      const draftScopes = requiredScopesForFeatures(Object.entries(draftToSave.features).filter(([, enabled]) => enabled).map(([key]) => key as DerivFeature));
+      const resolvedDomain = getEffectiveHostname(draftToSave.deployment);
+      const syncedDraft: WizardDraft = {
+        ...draftToSave,
+        deployment: {
+          ...draftToSave.deployment,
+          customDomain: resolvedDomain,
+        },
+      };
+      const draftIssues = validateDraft(syncedDraft);
+      const draftScopes = requiredScopesForFeatures(Object.entries(syncedDraft.features).filter(([, enabled]) => enabled).map(([key]) => key as DerivFeature));
       const payload = {
         organisation_id: organisationId,
         site_id: siteId,
         version: configurationVersion,
         schema_version: 1,
-        template_id: draftToSave.template.id,
-        template_version: draftToSave.template.version,
+        template_id: syncedDraft.template.id,
+        template_version: syncedDraft.template.version,
         status: draftIssues.some(issue => issue.severity === "blocking") ? "invalid" : "valid",
         wizard_step: nextStep,
-        configuration: draftToSave,
+        configuration: syncedDraft,
         validation_result: { blocking: draftIssues.filter(issue => issue.severity === "blocking"), warnings: draftIssues.filter(issue => issue.severity === "warning"), checkedAt: new Date().toISOString() },
         created_by: user.id,
       };
@@ -368,38 +717,44 @@ const SiteWizard = () => {
       if (error) throw error;
       setConfigurationId(data.id);
       setConfigurationVersion(data.version);
+      const nextSiteName = syncedDraft.project.siteName.trim() || "Untitled site";
       const writes = [
-        db.from("sites").update({ name: draftToSave.project.siteName.trim(), internal_name: draftToSave.project.internalName.trim(), description: draftToSave.project.description.trim(), default_language: draftToSave.project.language, target_region: draftToSave.project.region || null, configuration_status: payload.status }).eq("id", siteId),
+        db.from("sites").update({ name: nextSiteName, internal_name: syncedDraft.project.internalName.trim() || nextSiteName, description: syncedDraft.project.description.trim(), default_language: syncedDraft.project.language, target_region: syncedDraft.project.region || null, configuration_status: payload.status }).eq("id", siteId),
         db.from("site_settings").upsert({
           site_id: siteId,
-          site_name: draftToSave.branding.siteTitle || draftToSave.project.siteName,
-          brand_name: draftToSave.project.siteName,
-          logo_url: draftToSave.branding.logoUrl || null,
-          favicon_url: draftToSave.branding.faviconUrl || null,
-          primary_color: draftToSave.branding.primaryColor,
-          secondary_color: draftToSave.branding.secondaryColor,
-          accent_color: draftToSave.branding.accentColor,
+          site_name: syncedDraft.branding.siteTitle || nextSiteName,
+          brand_name: syncedDraft.project.siteName.trim() || nextSiteName,
+          logo_url: syncedDraft.branding.logoUrl || null,
+          favicon_url: syncedDraft.branding.faviconUrl || null,
+          primary_color: syncedDraft.branding.primaryColor,
+          secondary_color: syncedDraft.branding.secondaryColor,
+          accent_color: syncedDraft.branding.accentColor,
           custom_css_vars_json: {
-            "--site-background": draftToSave.branding.backgroundColor,
-            "--site-surface": draftToSave.branding.surfaceColor,
-            "--site-text": draftToSave.branding.textColor,
-            "--site-radius": draftToSave.branding.borderRadius,
+            "--site-background": syncedDraft.branding.backgroundColor,
+            "--site-surface": syncedDraft.branding.surfaceColor,
+            "--site-text": syncedDraft.branding.textColor,
+            "--site-radius": syncedDraft.branding.borderRadius,
           },
         }, { onConflict: "site_id" }),
-        db.from("site_deriv_apps").upsert({ site_id: siteId, deriv_app_id: draftToSave.deriv.appId || null, oauth_client_id: draftToSave.deriv.oauthClientId || null, redirect_uri: draftToSave.deriv.callbackUri || null, use_legacy_oauth_login: false, include_legacy_app_id_in_oauth: false }, { onConflict: "site_id" }),
+        db.from("site_deriv_apps").upsert({ site_id: siteId, deriv_app_id: syncedDraft.deriv.appId || null, oauth_client_id: syncedDraft.deriv.oauthClientId || null, redirect_uri: syncedDraft.deriv.callbackUri || null, use_legacy_oauth_login: false, include_legacy_app_id_in_oauth: false }, { onConflict: "site_id" }),
       ];
-      if (draftToSave.deployment.customDomain.trim()) {
-        writes.push(db.from("site_domains").upsert({ site_id: siteId, hostname: draftToSave.deployment.customDomain.trim().toLowerCase(), is_primary: true }, { onConflict: "hostname" }));
-      }
-      if (draftToSave.deriv.appId.trim() && draftToSave.deriv.oauthClientId.trim() && draftToSave.deriv.callbackUri.trim()) {
-        writes.push(db.from("deriv_applications").upsert({ organisation_id: organisationId, site_id: siteId, app_id: draftToSave.deriv.appId.trim(), oauth_client_id: draftToSave.deriv.oauthClientId.trim(), callback_uri: draftToSave.deriv.callbackUri.trim(), environment: draftToSave.deriv.environment, configured_scopes: draftScopes, markup_rate: draftToSave.deriv.markupRate ? Number(draftToSave.deriv.markupRate) : null, verification_status: "configured" }, { onConflict: "site_id" }));
+      if (syncedDraft.deriv.appId.trim() && syncedDraft.deriv.oauthClientId.trim() && syncedDraft.deriv.callbackUri.trim()) {
+        writes.push(db.from("deriv_applications").upsert({ organisation_id: organisationId, site_id: siteId, app_id: syncedDraft.deriv.appId.trim(), oauth_client_id: syncedDraft.deriv.oauthClientId.trim(), callback_uri: syncedDraft.deriv.callbackUri.trim(), environment: syncedDraft.deriv.environment, configured_scopes: draftScopes, markup_rate: syncedDraft.deriv.markupRate ? Number(syncedDraft.deriv.markupRate) : null, verification_status: "configured" }, { onConflict: "site_id" }));
       }
       const results = await Promise.all(writes);
       const failedWrite = results.find(result => result.error);
       if (failedWrite?.error) throw failedWrite.error;
+      if (resolvedDomain && validateCustomHostname(resolvedDomain).valid) {
+        const domainState = await attachHostnameToSite(siteId, resolvedDomain);
+        setSavedDomainState({
+          hostname: domainState.hostname,
+          status: domainState.status,
+          isVerified: domainState.is_verified,
+        });
+      }
       await db.from("site_bots_manifest").delete().eq("site_id", siteId);
-      if (draftToSave.bots.length) {
-        const botRows = draftToSave.bots.map((bot, index) => ({
+      if (syncedDraft.bots.length) {
+        const botRows = syncedDraft.bots.map((bot, index) => ({
           site_id: siteId,
           bot_id: bot.id,
           display_name: bot.name,
@@ -412,11 +767,10 @@ const SiteWizard = () => {
         const { error: botsError } = await db.from("site_bots_manifest").insert(botRows);
         if (botsError) throw botsError;
       }
-      if (draftToSave.deployment.customDomain.trim()) {
-        const { error: demoteError } = await db.from("site_domains").update({ is_primary: false }).eq("site_id", siteId).neq("hostname", draftToSave.deployment.customDomain.trim().toLowerCase());
-        if (demoteError) throw demoteError;
-      }
       toast.success("Draft saved");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to save draft");
+      throw error;
     } finally {
       setSaving(false);
     }
@@ -437,11 +791,37 @@ const SiteWizard = () => {
     }
     try {
       await saveDraft(10);
+      if (effectiveHostname) {
+        const provisioned = await provisionSiteDomain(siteId, {
+          action: "provision",
+          hostname: effectiveHostname,
+        });
+        if (provisioned.domain) {
+          setSavedDomainState({
+            hostname: provisioned.domain.hostname,
+            status: provisioned.domain.status,
+            isVerified: provisioned.domain.isVerified,
+          });
+        }
+        if (provisioned.domainVerification.length) {
+          setVercelVerification(provisioned.domainVerification);
+        }
+      }
       await invokePublish();
       localStorage.removeItem(publishQueueKey);
-      toast.success("Configuration committed. Vercel deployment is updating.");
+      toast.success(
+        isVercelAppHostname(effectiveHostname)
+          ? `Site published and live at https://${effectiveHostname}!`
+          : "Configuration committed. If DNS is still propagating, verify your domain in Deployment status.",
+      );
       navigate(`/sites/${siteId}/config`);
     } catch (error) {
+      if (error instanceof ProvisionDomainError && error.suggestions.length) {
+        setSlugSuggestions(error.suggestions);
+        setStep(7);
+        toast.error(error.message);
+        return;
+      }
       if (!navigator.onLine || (error instanceof Error && /fetch|network|offline/i.test(`${error.name} ${error.message}`))) {
         localStorage.setItem(publishQueueKey, JSON.stringify({ draft, queuedAt: new Date().toISOString() }));
         toast.info("Update queued on this device. Reopen Site Manager after reconnecting and it will publish automatically.");
@@ -753,18 +1133,445 @@ const SiteWizard = () => {
             ) : null}
 
             {step === 7 ? (
-              <section className="space-y-5">
+              <section className="space-y-6">
                 <div>
                   <h2 className="text-xl font-semibold">Domain and callback</h2>
-                  <p className="mt-1 text-sm text-slate-500">Domain setup comes after branding and bots so the user knows what they are launching before DNS work starts.</p>
+                  <p className="mt-1 text-sm text-slate-500">
+                    No domain purchase required — launch free on a <code>.vercel.app</code> subdomain, connect a domain you already own, or buy a new domain.
+                  </p>
                 </div>
+
+                {/* 3 Domain Mode Cards */}
+                <div className="grid gap-3 md:grid-cols-3">
+                  <button
+                    type="button"
+                    onClick={() => selectDomainMode("vercel_subdomain")}
+                    className={`rounded-lg border p-4 text-left transition ${
+                      draft.deployment.domainMode === "vercel_subdomain"
+                        ? "border-sky-500 bg-sky-50 ring-1 ring-sky-500/30"
+                        : "border-slate-200 bg-white hover:border-slate-300"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <Sparkles className="h-4 w-4 text-sky-600" />
+                      <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-800">
+                        Free · Instant
+                      </span>
+                    </div>
+                    <h3 className="mt-2.5 text-sm font-semibold text-slate-950">
+                      Free Vercel Subdomain
+                    </h3>
+                    <p className="mt-1 text-xs leading-5 text-slate-500">
+                      Get <code>your-brand.vercel.app</code> with automatic SSL and zero DNS setup.
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => selectDomainMode("custom_domain")}
+                    className={`rounded-lg border p-4 text-left transition ${
+                      draft.deployment.domainMode === "custom_domain"
+                        ? "border-sky-500 bg-sky-50 ring-1 ring-sky-500/30"
+                        : "border-slate-200 bg-white hover:border-slate-300"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <Link2 className="h-4 w-4 text-sky-600" />
+                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-700">
+                        BYO Domain
+                      </span>
+                    </div>
+                    <h3 className="mt-2.5 text-sm font-semibold text-slate-950">
+                      Connect Own Domain
+                    </h3>
+                    <p className="mt-1 text-xs leading-5 text-slate-500">
+                      Already own a domain? Point its DNS record to Vercel and verify ownership.
+                    </p>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => selectDomainMode("buy_domain")}
+                    className={`rounded-lg border p-4 text-left transition ${
+                      draft.deployment.domainMode === "buy_domain"
+                        ? "border-sky-500 bg-sky-50 ring-1 ring-sky-500/30"
+                        : "border-slate-200 bg-white hover:border-slate-300"
+                    }`}
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <ShoppingCart className="h-4 w-4 text-sky-600" />
+                      <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-700">
+                        M-Pesa
+                      </span>
+                    </div>
+                    <h3 className="mt-2.5 text-sm font-semibold text-slate-950">
+                      Buy a New Domain
+                    </h3>
+                    <p className="mt-1 text-xs leading-5 text-slate-500">
+                      Search available <code>.com</code>, <code>.site</code>, and other domains and register here.
+                    </p>
+                  </button>
+                </div>
+
+                {/* Mode 1: Free Vercel Subdomain */}
+                {draft.deployment.domainMode === "vercel_subdomain" ? (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-semibold text-slate-950">
+                          Free Vercel Subdomain
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          No domain or Vercel account required. You can upgrade this site to a custom domain anytime later.
+                        </p>
+                      </div>
+                      {draft.project.siteName.trim() ? (
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          onClick={() =>
+                            handleVercelSlugChange(
+                              normalizeVercelSlug(draft.project.siteName),
+                            )
+                          }
+                        >
+                          Use "{normalizeVercelSlug(draft.project.siteName)}"
+                        </Button>
+                      ) : null}
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <div className="flex items-center rounded-md border border-slate-300 bg-white focus-within:border-sky-500 focus-within:ring-2 focus-within:ring-sky-500/20">
+                        <span className="pl-3 text-sm text-slate-400 select-none">
+                          https://
+                        </span>
+                        <input
+                          type="text"
+                          value={draft.deployment.subdomain}
+                          onChange={event => handleVercelSlugChange(event.target.value)}
+                          placeholder="alpha-traders"
+                          className="flex-1 bg-transparent px-1.5 py-2 text-sm text-slate-950 outline-none"
+                        />
+                        <span className="pr-3 text-sm font-medium text-slate-500 select-none">
+                          {VERCEL_SUFFIX}
+                        </span>
+                      </div>
+
+                      {(() => {
+                        const check = validateVercelSlug(draft.deployment.subdomain);
+                        if (draft.deployment.subdomain && !check.valid) {
+                          return <p className="text-xs text-red-600">{check.error}</p>;
+                        }
+                        if (check.valid) {
+                          const isCurrentVerified =
+                            savedDomainState?.hostname === check.hostname &&
+                            savedDomainState.isVerified;
+                          return (
+                            <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
+                              <span className="text-xs text-slate-600">
+                                Public URL:{" "}
+                                <strong className="text-slate-950">
+                                  https://{check.hostname}
+                                </strong>
+                                {isCurrentVerified ? (
+                                  <span className="ml-2 inline-flex items-center gap-1 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-800">
+                                    <Check className="h-3 w-3" /> Active + SSL on Vercel
+                                  </span>
+                                ) : null}
+                              </span>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                disabled={Boolean(domainActionPending)}
+                                onClick={() => handleVerifyOrAttachDomain("attach")}
+                              >
+                                {domainActionPending === "attach" ? (
+                                  <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                                ) : (
+                                  <Sparkles className="mr-1.5 h-3.5 w-3.5 text-sky-600" />
+                                )}
+                                {isCurrentVerified ? "Re-check on Vercel" : "Claim on Vercel"}
+                              </Button>
+                            </div>
+                          );
+                        }
+                        return (
+                          <p className="text-xs text-slate-500">
+                            Use 3–63 lowercase letters, numbers, or single hyphens (e.g. <code>nairobi-traders</code>).
+                          </p>
+                        );
+                      })()}
+                    </div>
+
+                    {slugSuggestions.length > 0 ? (
+                      <div className="rounded-md border border-amber-200 bg-amber-50 p-3 space-y-2">
+                        <p className="text-xs font-medium text-amber-900">
+                          That name is already taken on Vercel. Click a suggestion or type another:
+                        </p>
+                        <div className="flex flex-wrap gap-2">
+                          {slugSuggestions.map(suggestion => (
+                            <button
+                              key={suggestion}
+                              type="button"
+                              onClick={() => handleVercelSlugChange(suggestion)}
+                              className="rounded-md border border-amber-300 bg-white px-2.5 py-1 text-xs font-medium text-slate-900 hover:border-sky-500"
+                            >
+                              {suggestion}
+                              {VERCEL_SUFFIX}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {/* Mode 2: Connect Existing Custom Domain */}
+                {draft.deployment.domainMode === "custom_domain" ? (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 space-y-4">
+                    <div className="flex flex-wrap items-start justify-between gap-2">
+                      <div>
+                        <p className="text-sm font-semibold text-slate-950">
+                          Connect a Domain You Already Own
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          Enter your root domain (e.g. <code>mybrand.com</code>, <code>mybrand.co.ke</code>) or subdomain (e.g. <code>trade.mybrand.com</code>).
+                        </p>
+                      </div>
+                      {effectiveHostname &&
+                      savedDomainState?.hostname === effectiveHostname ? (
+                        <span
+                          className={`inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                            savedDomainState.isVerified
+                              ? "bg-emerald-100 text-emerald-800"
+                              : "bg-amber-100 text-amber-800"
+                          }`}
+                        >
+                          {savedDomainState.isVerified
+                            ? "Verified + SSL"
+                            : "Pending DNS verification"}
+                        </span>
+                      ) : null}
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <Input
+                        value={draft.deployment.customDomain}
+                        onChange={event => handleCustomDomainChange(event.target.value, false)}
+                        onBlur={event => handleCustomDomainChange(event.target.value, true)}
+                        placeholder="mybrand.com or trade.mybrand.com"
+                        className="bg-white"
+                      />
+                      {(() => {
+                        const check = validateCustomHostname(draft.deployment.customDomain);
+                        if (draft.deployment.customDomain && !check.valid) {
+                          return <p className="text-xs text-red-600">{check.error}</p>;
+                        }
+                        if (check.valid && check.isVercelSubdomain) {
+                          return (
+                            <p className="text-xs text-amber-700">
+                              Tip: <code>.vercel.app</code> domains hosted on another Vercel project must be removed there before attaching here, or choose a fresh name under <strong>Free Vercel Subdomain</strong>.
+                            </p>
+                          );
+                        }
+                        return null;
+                      })()}
+                    </div>
+
+                    {dnsInstructions.length > 0 ? (
+                      <div className="rounded-md border border-slate-200 bg-white p-3.5 space-y-2.5">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <p className="text-xs font-semibold text-slate-900">
+                            DNS records to configure at your domain registrar
+                          </p>
+                          <div className="flex flex-wrap gap-2">
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant="outline"
+                              disabled={Boolean(domainActionPending)}
+                              onClick={() => handleVerifyOrAttachDomain("attach")}
+                            >
+                              {domainActionPending === "attach" ? (
+                                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <Globe className="mr-1.5 h-3.5 w-3.5" />
+                              )}
+                              Attach on Vercel
+                            </Button>
+                            <Button
+                              type="button"
+                              size="sm"
+                              disabled={Boolean(domainActionPending)}
+                              onClick={() => handleVerifyOrAttachDomain("verify")}
+                            >
+                              {domainActionPending === "verify" ? (
+                                <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+                              )}
+                              Verify DNS
+                            </Button>
+                          </div>
+                        </div>
+
+                        <div className="space-y-2">
+                          {dnsInstructions.map(record => (
+                            <div
+                              key={`${record.type}:${record.name}:${record.value}`}
+                              className="flex flex-wrap items-center justify-between gap-2 rounded border border-slate-200 bg-slate-50 px-3 py-2 text-xs"
+                            >
+                              <div className="space-y-0.5">
+                                <div className="flex flex-wrap items-center gap-2 font-mono text-slate-900">
+                                  <span className="rounded bg-sky-100 px-1.5 py-0.5 text-[11px] font-semibold text-sky-800">
+                                    {record.type}
+                                  </span>
+                                  <span>Host: {record.name}</span>
+                                  <span className="text-slate-400">→</span>
+                                  <span className="font-semibold break-all">{record.value}</span>
+                                  {!record.required ? (
+                                    <span className="rounded bg-slate-200 px-1.5 py-0.5 font-sans text-[10px] text-slate-600">
+                                      Optional
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <p className="text-[11px] text-slate-500">{record.purpose}</p>
+                              </div>
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="ghost"
+                                onClick={() => copyToClipboard(record.value, `${record.type} value copied`)}
+                              >
+                                <Copy className="mr-1 h-3 w-3" />
+                                Copy
+                              </Button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {/* Mode 3: Buy a New Domain */}
+                {draft.deployment.domainMode === "buy_domain" ? (
+                  <div className="rounded-lg border border-slate-200 bg-slate-50 p-4 space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <p className="text-sm font-semibold text-slate-950">
+                          Purchase a New Domain
+                        </p>
+                        <p className="text-xs text-slate-500">
+                          {effectiveHostname
+                            ? `Linked domain: ${effectiveHostname}`
+                            : "Search available domains and complete payment via M-Pesa."}
+                        </p>
+                      </div>
+                      <Button type="button" onClick={() => setBuyDialogOpen(true)}>
+                        <ShoppingCart className="mr-2 h-4 w-4" />
+                        {effectiveHostname ? "Buy a Different Domain" : "Search & Buy Domain"}
+                      </Button>
+                    </div>
+
+                    {effectiveHostname && dnsInstructions.length > 0 ? (
+                      <div className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-slate-200 bg-white px-3 py-2.5 text-xs">
+                        <span className="text-slate-700">
+                          Domain: <strong className="text-slate-950">{effectiveHostname}</strong>
+                          {savedDomainState?.hostname === effectiveHostname &&
+                          savedDomainState.isVerified ? (
+                            <span className="ml-2 rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-medium text-emerald-800">
+                              Verified
+                            </span>
+                          ) : null}
+                        </span>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={Boolean(domainActionPending)}
+                          onClick={() => handleVerifyOrAttachDomain("verify")}
+                        >
+                          {domainActionPending ? (
+                            <Loader2 className="mr-1.5 h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <RefreshCw className="mr-1.5 h-3.5 w-3.5" />
+                          )}
+                          Verify on Vercel
+                        </Button>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
+
+                {/* Domain change / upgrade reminder */}
+                {savedDomainState?.hostname &&
+                effectiveHostname &&
+                savedDomainState.hostname !== effectiveHostname ? (
+                  <div className="flex items-start gap-2 rounded-md border border-sky-200 bg-sky-50 p-3 text-xs text-sky-900">
+                    <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-sky-600" />
+                    <span>
+                      Switching domain from <strong>{savedDomainState.hostname}</strong> to{" "}
+                      <strong>{effectiveHostname}</strong>: remember to update the Redirect URL in your Deriv App settings to{" "}
+                      <code>{expectedCallbackUri}</code>.
+                    </span>
+                  </div>
+                ) : null}
+
+                {/* Deriv Callback URL + Deployment metadata */}
                 <div className="grid gap-4 md:grid-cols-2">
-                  <Field label="Temporary subdomain">{input(draft.deployment.subdomain, value => updateDeployment("subdomain", value))}</Field>
-                  <Field label="Custom domain">{input(draft.deployment.customDomain, value => updateDeployment("customDomain", value.toLowerCase()))}</Field>
+                  <div className="md:col-span-2 space-y-1.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-sm font-medium text-slate-900">
+                        Exact registered Deriv callback URL
+                      </span>
+                      {expectedCallbackUri ? (
+                        <div className="flex items-center gap-2">
+                          {draft.deriv.callbackUri !== expectedCallbackUri ? (
+                            <button
+                              type="button"
+                              onClick={() => updateDeriv("callbackUri", expectedCallbackUri)}
+                              className="text-xs font-medium text-sky-600 hover:underline"
+                            >
+                              Use recommended URL
+                            </button>
+                          ) : null}
+                          <button
+                            type="button"
+                            onClick={() =>
+                              copyToClipboard(expectedCallbackUri, "Callback URL copied")
+                            }
+                            className="inline-flex items-center gap-1 text-xs text-slate-600 hover:text-slate-950"
+                          >
+                            <Copy className="h-3 w-3" />
+                            Copy
+                          </button>
+                        </div>
+                      ) : null}
+                    </div>
+                    {input(draft.deriv.callbackUri, value => updateDeriv("callbackUri", value))}
+                    <p className="text-xs text-slate-500">
+                      Register{" "}
+                      <code className="text-slate-800">
+                        {expectedCallbackUri || "https://your-domain.vercel.app/api/deriv-oauth-callback"}
+                      </code>{" "}
+                      in your{" "}
+                      <a
+                        href="https://api.deriv.com/dashboard"
+                        target="_blank"
+                        rel="noreferrer"
+                        className="inline-flex items-center gap-0.5 text-sky-600 hover:underline"
+                      >
+                        Deriv API Dashboard <ExternalLink className="h-3 w-3" />
+                      </a>
+                      .
+                    </p>
+                  </div>
+
                   <Field label="Production branch">{input(draft.deployment.branch, value => updateDeployment("branch", value))}</Field>
                   <Field label="Output directory">{input(draft.deployment.outputDirectory, value => updateDeployment("outputDirectory", value))}</Field>
-                  <Field label="Exact registered callback URL" help={`Register https://${draft.deployment.customDomain || "your-domain"}/api/deriv-oauth-callback in Deriv.`}>{input(draft.deriv.callbackUri, value => updateDeriv("callbackUri", value))}</Field>
-                  <Field label="Provider">{input("Vercel", () => {})}</Field>
                 </div>
               </section>
             ) : null}
@@ -802,7 +1609,7 @@ const SiteWizard = () => {
                   <div className="rounded-md border border-slate-200 p-4"><span className="text-xs text-slate-500">Plan</span><p className="font-medium">{selectedPlan.price}</p></div>
                   <div className="rounded-md border border-slate-200 p-4"><span className="text-xs text-slate-500">Bots</span><p className="font-medium">{draft.bots.filter(bot => bot.isActive).length} active</p></div>
                   <div className="rounded-md border border-slate-200 p-4"><span className="text-xs text-slate-500">Scopes</span><p className="font-medium">{requiredScopes.length || "None"}</p></div>
-                  <div className="rounded-md border border-slate-200 p-4"><span className="text-xs text-slate-500">Domain</span><p className="font-medium">{draft.deployment.customDomain || "Not set"}</p></div>
+                  <div className="rounded-md border border-slate-200 p-4"><span className="text-xs text-slate-500">Domain</span><p className="font-medium break-all">{effectiveHostname || "Not set"}</p></div>
                 </div>
                 <div className="space-y-2">
                   {displayIssues.length === 0 ? <div className="flex gap-2 text-emerald-700"><Check className="h-4 w-4" />Configuration checks passed. Continue to payment.</div> : null}
@@ -850,11 +1657,38 @@ const SiteWizard = () => {
         <div className="mt-6 flex justify-between">
           <Button variant="outline" disabled={step === 1} onClick={() => setStep(value => Math.max(1, value - 1))}><ArrowLeft className="mr-2 h-4 w-4" />Back</Button>
           <div className="flex gap-2">
-            <Button variant="ghost" disabled={saving} onClick={() => saveDraft(step)}>{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}<span className="ml-2">Save draft</span></Button>
-            {step < steps.length ? <Button onClick={async () => { await saveDraft(step + 1); setStep(value => Math.min(steps.length, value + 1)); }}>Continue<ArrowRight className="ml-2 h-4 w-4" /></Button> : null}
+            <Button variant="ghost" disabled={saving} onClick={() => saveDraft(step).catch(() => {})}>{saving ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}<span className="ml-2">Save draft</span></Button>
+            {step < steps.length ? <Button disabled={saving} onClick={async () => { try { await saveDraft(step + 1); setStep(value => Math.min(steps.length, value + 1)); } catch { /* toast already shown */ } }}>Continue<ArrowRight className="ml-2 h-4 w-4" /></Button> : null}
           </div>
         </div>
       </div>
+
+      <BuyDomainDialog
+        open={buyDialogOpen}
+        onOpenChange={setBuyDialogOpen}
+        targetSiteId={siteId}
+        onDomainPurchased={domain => {
+          const normalized = normalizeHostnameInput(domain);
+          setSavedDomainState({
+            hostname: normalized,
+            status: "pending",
+            isVerified: false,
+          });
+          setDraft(current => ({
+            ...current,
+            deployment: {
+              ...current.deployment,
+              domainMode: "buy_domain",
+              customDomain: normalized,
+            },
+            deriv: {
+              ...current.deriv,
+              callbackUri: buildDerivCallbackUrl(normalized),
+            },
+          }));
+          toast.success(`${normalized} linked to this site`);
+        }}
+      />
     </div>
   );
 };

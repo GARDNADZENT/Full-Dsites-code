@@ -1,5 +1,11 @@
 import { supabase } from "@/integrations/supabase/client";
 import type { Json, Tables, TablesInsert, TablesUpdate } from "@/integrations/supabase/types";
+import {
+  type DnsInstruction,
+  type DomainVerificationRecord,
+  friendlyDomainSaveError,
+  validateCustomHostname,
+} from "@/lib/domain-utils";
 
 export const DEFAULT_SITE_PAGES = [
   { page_key: "bot_ideas", label: "Bot Ideas", enabled: true, sort_order: 0 },
@@ -255,26 +261,53 @@ export async function upsertSiteDerivApp(siteId: string, input: SiteDerivAppInpu
 }
 
 export async function upsertSiteDomain(siteId: string, input: SiteDomainInput) {
-  const payload: TablesInsert<"site_domains"> = {
-    site_id: siteId,
-    hostname: input.hostname.trim().toLowerCase(),
-    is_primary: input.is_primary ?? true,
-    status: input.status,
-    is_verified: input.is_verified ?? (input.status === "verified" || input.status === "active"),
-    ssl_status: input.ssl_status ?? null,
-  };
+  const check = validateCustomHostname(input.hostname);
+  if (!check.valid) {
+    throw new Error(check.error || "Enter a valid domain name");
+  }
+
+  const normalizedHostname = check.hostname;
 
   if (input.id) {
+    const { data: existing } = await supabase
+      .from("site_domains")
+      .select("id, hostname, status, is_verified, ssl_status")
+      .eq("id", input.id)
+      .eq("site_id", siteId)
+      .maybeSingle();
+
+    const hostnameUnchanged =
+      existing && existing.hostname.toLowerCase() === normalizedHostname;
+
+    // Never allow client-side changes to self-verify an unverified or newly edited hostname;
+    // Vercel verification in provision-site-vercel sets is_verified and active status.
+    const updatePayload: TablesUpdate<"site_domains"> = {
+      hostname: normalizedHostname,
+      is_primary: input.is_primary ?? true,
+      status: hostnameUnchanged ? existing.status : "pending",
+      is_verified: hostnameUnchanged ? existing.is_verified : false,
+      ssl_status: hostnameUnchanged ? existing.ssl_status : "pending",
+    };
+
     const { data, error } = await supabase
       .from("site_domains")
-      .update(payload as TablesUpdate<"site_domains">)
+      .update(updatePayload)
       .eq("id", input.id)
       .select()
       .single();
 
-    if (error) throw new Error(error.message);
+    if (error) throw new Error(friendlyDomainSaveError(error));
     return data;
   }
+
+  const payload: TablesInsert<"site_domains"> = {
+    site_id: siteId,
+    hostname: normalizedHostname,
+    is_primary: input.is_primary ?? true,
+    status: "pending",
+    is_verified: false,
+    ssl_status: "pending",
+  };
 
   const { data, error } = await supabase
     .from("site_domains")
@@ -282,7 +315,7 @@ export async function upsertSiteDomain(siteId: string, input: SiteDomainInput) {
     .select()
     .single();
 
-  if (error) throw new Error(error.message);
+  if (error) throw new Error(friendlyDomainSaveError(error));
   return data;
 }
 
@@ -491,26 +524,89 @@ export async function getSiteIntegration(siteId: string): Promise<SiteIntegratio
   return data;
 }
 
-export async function provisionSite(siteId: string): Promise<SiteIntegrationRow> {
+export type ProvisionDomainResult = {
+  integration: SiteIntegrationRow;
+  mode?: "shared" | "dedicated";
+  domain?: {
+    hostname: string;
+    isVercelSubdomain: boolean;
+    isVerified: boolean;
+    status: string;
+    sslStatus: string;
+    misconfigured: boolean;
+  } | null;
+  dnsRecords: DnsInstruction[];
+  domainVerification: DomainVerificationRecord[];
+};
+
+export class ProvisionDomainError extends Error {
+  code?: string;
+  suggestions: string[];
+
+  constructor(message: string, code?: string, suggestions?: string[]) {
+    super(message);
+    this.code = code;
+    this.suggestions = Array.isArray(suggestions) ? suggestions : [];
+  }
+}
+
+export async function provisionSiteDomain(
+  siteId: string,
+  options: { action?: "provision" | "attach" | "verify"; hostname?: string } = {},
+): Promise<ProvisionDomainResult> {
   const { data, error } = await supabase.functions.invoke<{
     integration: SiteIntegrationRow;
     mode?: "shared" | "dedicated";
-    domainVerification?: Array<{ type?: string; domain?: string; value?: string }>;
+    domain?: ProvisionDomainResult["domain"];
+    dnsRecords?: DnsInstruction[];
+    domainVerification?: DomainVerificationRecord[];
     error?: string;
+    code?: string;
+    suggestions?: string[];
   }>("provision-site-vercel", {
-    body: { siteId },
+    body: {
+      siteId,
+      action: options.action || "provision",
+      ...(options.hostname ? { hostname: options.hostname } : {}),
+    },
   });
+
   if (error) {
     let message = error.message;
+    let code: string | undefined;
+    let suggestions: string[] | undefined;
     const context = "context" in error ? error.context : null;
     if (context instanceof Response) {
       const body = await context.json().catch(() => null);
       if (body?.error) message = body.error;
+      if (body?.code) code = body.code;
+      if (Array.isArray(body?.suggestions)) suggestions = body.suggestions;
     }
-    throw new Error(message);
+    throw new ProvisionDomainError(message, code, suggestions);
   }
-  if (!data?.integration) throw new Error("Provisioning returned no integration");
-  return data.integration;
+
+  if (data?.error) {
+    throw new ProvisionDomainError(data.error, data.code, data.suggestions);
+  }
+
+  if (!data?.integration) {
+    throw new ProvisionDomainError("Provisioning returned no integration");
+  }
+
+  return {
+    integration: data.integration,
+    mode: data.mode,
+    domain: data.domain ?? null,
+    dnsRecords: Array.isArray(data.dnsRecords) ? data.dnsRecords : [],
+    domainVerification: Array.isArray(data.domainVerification)
+      ? data.domainVerification
+      : [],
+  };
+}
+
+export async function provisionSite(siteId: string): Promise<SiteIntegrationRow> {
+  const result = await provisionSiteDomain(siteId, { action: "provision" });
+  return result.integration;
 }
 
 export async function retryDeployment(deploymentId: string): Promise<GitHubPublishResult> {

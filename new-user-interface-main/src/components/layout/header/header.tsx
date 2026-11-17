@@ -23,6 +23,8 @@ const AppHeader = observer(() => {
     const { client } = useStore() ?? {};
     const [authTimeout, setAuthTimeout] = useState(false);
     const is_account_regenerating = client?.is_account_regenerating || false;
+    const isOAuthPending =
+        typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('code');
 
     const { data: activeAccount } = useActiveAccount({
         allBalanceData: client?.all_accounts_balance,

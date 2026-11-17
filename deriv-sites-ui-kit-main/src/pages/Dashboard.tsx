@@ -1,16 +1,44 @@
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import { Globe, Clock, AlertCircle, RefreshCw, Settings2, Rocket, ExternalLink } from "lucide-react";
+import { Globe, Clock, AlertCircle, RefreshCw, Settings2, Rocket, ExternalLink, Plus, Loader2, Sparkles, Link2 } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useDashboard } from "@/hooks/useDashboard";
+import { useAuth } from "@/contexts/AuthContext";
+import {
+  createDraftSite,
+  getDomainKindLabel,
+  getSitePrimaryDomainRecord,
+  getSitePrimaryHostname,
+} from "@/lib/domain-utils";
+import ConnectDomainDialog from "@/components/ConnectDomainDialog";
 import { differenceInDays } from "date-fns";
 import { toast } from "sonner";
 
 const Dashboard = () => {
   const [searchParams, setSearchParams] = useSearchParams();
   const navigate = useNavigate();
-  const { sites, subscription, isLoading } = useDashboard();
+  const { user } = useAuth();
+  const { sites, subscription, isLoading, refetch } = useDashboard();
   const [showSetupNotification, setShowSetupNotification] = useState(false);
+  const [creatingSite, setCreatingSite] = useState(false);
+  const [connectDialogOpen, setConnectDialogOpen] = useState(false);
+  const [connectMode, setConnectMode] = useState<"vercel_subdomain" | "custom_domain">("vercel_subdomain");
+
+  const handleCreateNewSite = async () => {
+    if (!user) return;
+    setCreatingSite(true);
+    try {
+      const { siteId } = await createDraftSite({
+        userId: user.id,
+        email: user.email,
+      });
+      toast.success("Site draft created");
+      navigate(`/sites/${siteId}/wizard`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed to create site");
+      setCreatingSite(false);
+    }
+  };
 
   useEffect(() => {
     if (searchParams.get('setup') === 'complete') {
@@ -41,13 +69,21 @@ const Dashboard = () => {
   return (
     <div className="flex-1 flex flex-col">
       {/* Header */}
-      <header className="py-4 sm:py-6 px-4 sm:px-6 lg:px-8">
+      <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 py-4 sm:py-6 px-4 sm:px-6 lg:px-8">
         <div>
           <h1 className="text-lg sm:text-2xl font-semibold text-foreground">Dashboard</h1>
           <p className="text-xs sm:text-sm text-muted-foreground">
             Quick overview of your sites
           </p>
         </div>
+        <button
+          onClick={handleCreateNewSite}
+          disabled={creatingSite}
+          className="btn-primary inline-flex items-center justify-center gap-2 text-sm w-full sm:w-auto disabled:opacity-60"
+        >
+          {creatingSite ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+          <span>{creatingSite ? "Creating..." : "New Site"}</span>
+        </button>
       </header>
 
       <div className="flex-1 px-4 sm:px-6 lg:px-8 pb-8 space-y-6">
@@ -160,10 +196,153 @@ const Dashboard = () => {
         </div>
 
         <section className="space-y-3">
-          <div className="flex items-center justify-between"><div><h2 className="text-lg font-semibold">Your sites</h2><p className="text-xs text-muted-foreground">Configuration, deployment, and live-site access.</p></div><button className="text-sm text-primary" onClick={() => navigate('/domains')}>Manage domains</button></div>
-          {sites.length === 0 ? <div className="rounded-xl border border-white/10 bg-panel-bg p-6 text-sm text-muted-foreground">No sites yet. Buy or connect a domain to start the guided setup.</div> : <div className="grid md:grid-cols-2 gap-3">{sites.map(site => <article key={site.id} className="rounded-xl border border-white/10 bg-panel-bg p-4 space-y-4"><div className="flex items-start justify-between gap-3"><div><h3 className="font-medium">{site.name}</h3><p className="text-xs text-muted-foreground mt-1">Configuration: {site.configuration_status || 'legacy'}{site.active_configuration_version ? ` · v${site.active_configuration_version}` : ''}</p></div><span className={`rounded-full px-2 py-1 text-xs ${site.status === 'active' ? 'bg-emerald-500/10 text-emerald-400' : 'bg-amber-500/10 text-amber-400'}`}>{site.status}</span></div><div className="flex flex-wrap gap-2"><button className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-3 py-2 text-xs" onClick={() => navigate(`/sites/${site.id}/wizard`)}><Settings2 className="w-3.5 h-3.5" />Configure</button><button className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-3 py-2 text-xs" onClick={() => navigate(`/sites/${site.id}/config`)}><Rocket className="w-3.5 h-3.5" />Deployments</button>{site.status === 'active' && site.domain_purchases?.domain_name && <a className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-3 py-2 text-xs" href={`https://${site.domain_purchases.domain_name}`} target="_blank" rel="noreferrer"><ExternalLink className="w-3.5 h-3.5" />Open site</a>}</div></article>)}</div>}
+          <div className="flex items-center justify-between gap-3">
+            <div>
+              <h2 className="text-lg font-semibold">Your sites</h2>
+              <p className="text-xs text-muted-foreground">
+                Configuration, deployment, and live-site access — launch on a free .vercel.app URL, connect your domain, or buy one.
+              </p>
+            </div>
+            <button className="text-sm text-primary whitespace-nowrap" onClick={() => navigate('/domains')}>
+              Manage domains
+            </button>
+          </div>
+
+          {sites.length === 0 ? (
+            <div className="rounded-xl border border-white/10 bg-panel-bg p-6 space-y-4">
+              <div>
+                <h3 className="text-sm font-medium text-foreground">No sites yet</h3>
+                <p className="text-xs sm:text-sm text-muted-foreground mt-1">
+                  You don't need to buy a domain to start. Launch instantly on a free <code className="text-foreground">.vercel.app</code> URL, connect a domain you already own, or purchase a new domain.
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  onClick={() => {
+                    setConnectMode("vercel_subdomain");
+                    setConnectDialogOpen(true);
+                  }}
+                  className="btn-primary inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-medium"
+                >
+                  <Sparkles className="w-3.5 h-3.5" />
+                  Free .vercel.app Site
+                </button>
+                <button
+                  onClick={() => {
+                    setConnectMode("custom_domain");
+                    setConnectDialogOpen(true);
+                  }}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/15 bg-white/5 px-3.5 py-2 text-xs font-medium text-foreground hover:bg-white/10"
+                >
+                  <Link2 className="w-3.5 h-3.5" />
+                  Connect Existing Domain
+                </button>
+                <button
+                  onClick={handleCreateNewSite}
+                  disabled={creatingSite}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-white/10 px-3.5 py-2 text-xs text-muted-foreground hover:text-foreground"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Start Blank Draft
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="grid md:grid-cols-2 gap-3">
+              {sites.map(site => {
+                const hostname = getSitePrimaryHostname(site);
+                const domainRow = getSitePrimaryDomainRecord(site);
+                const domainKind = getDomainKindLabel(site, hostname);
+                const canOpenLive =
+                  Boolean(hostname) &&
+                  (site.status === "active" || domainRow?.status === "active");
+
+                return (
+                  <article
+                    key={site.id}
+                    className="rounded-xl border border-white/10 bg-panel-bg p-4 space-y-4"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <h3 className="font-medium truncate">{site.name}</h3>
+                        {hostname ? (
+                          <div className="mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+                            <Globe className="w-3 h-3 shrink-0" />
+                            <span className="truncate">{hostname}</span>
+                            <span className="rounded bg-white/10 px-1.5 py-0.5 text-[10px] text-foreground">
+                              {domainKind}
+                            </span>
+                            {domainRow && !domainRow.is_verified ? (
+                              <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] text-amber-400">
+                                Pending verification
+                              </span>
+                            ) : null}
+                          </div>
+                        ) : (
+                          <p className="text-xs text-muted-foreground mt-1">
+                            No domain selected yet
+                          </p>
+                        )}
+                        <p className="text-xs text-muted-foreground mt-1">
+                          Configuration: {site.configuration_status || "legacy"}
+                          {site.active_configuration_version
+                            ? ` · v${site.active_configuration_version}`
+                            : ""}
+                        </p>
+                      </div>
+                      <span
+                        className={`rounded-full px-2 py-1 text-xs shrink-0 ${
+                          site.status === "active"
+                            ? "bg-emerald-500/10 text-emerald-400"
+                            : "bg-amber-500/10 text-amber-400"
+                        }`}
+                      >
+                        {site.status}
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-3 py-2 text-xs hover:bg-white/5"
+                        onClick={() => navigate(`/sites/${site.id}/wizard`)}
+                      >
+                        <Settings2 className="w-3.5 h-3.5" />
+                        Configure
+                      </button>
+                      <button
+                        className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-3 py-2 text-xs hover:bg-white/5"
+                        onClick={() => navigate(`/sites/${site.id}/config`)}
+                      >
+                        <Rocket className="w-3.5 h-3.5" />
+                        Deployments
+                      </button>
+                      {canOpenLive && hostname ? (
+                        <a
+                          className="inline-flex items-center gap-1 rounded-lg border border-white/10 px-3 py-2 text-xs hover:bg-white/5"
+                          href={`https://${hostname}`}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          <ExternalLink className="w-3.5 h-3.5" />
+                          Open site
+                        </a>
+                      ) : null}
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
         </section>
       </div>
+
+      <ConnectDomainDialog
+        open={connectDialogOpen}
+        onOpenChange={setConnectDialogOpen}
+        initialMode={connectMode}
+        sites={sites}
+        onConnected={() => refetch()}
+        onSwitchToBuy={() => navigate("/domains?buy=1")}
+      />
     </div>
   );
 };

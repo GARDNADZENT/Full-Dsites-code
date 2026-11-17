@@ -252,13 +252,21 @@ serve(async req => {
       auth: { persistSession: false, autoRefreshToken: false },
     });
 
-    const { data: domainRecord, error: domainError } = await supabaseAdmin
+    const lookupCandidates = hostname.startsWith("www.") && !hostname.endsWith(".vercel.app")
+      ? [hostname, hostname.slice(4)]
+      : [hostname];
+
+    const { data: domainRows, error: domainError } = await supabaseAdmin
       .from("site_domains")
       .select("site_id, hostname, is_verified, status")
-      .eq("hostname", hostname)
+      .in("hostname", lookupCandidates)
       .eq("is_verified", true)
-      .in("status", ["verified", "active"])
-      .maybeSingle();
+      .in("status", ["verified", "active"]);
+
+    const domainRecord =
+      domainRows?.find((row) => row.hostname === hostname) ||
+      domainRows?.[0] ||
+      null;
 
     if (domainError) {
       console.error("public-site-config domain lookup error", domainError);

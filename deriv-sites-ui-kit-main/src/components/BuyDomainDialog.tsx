@@ -14,6 +14,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { toast } from "sonner";
 import { usePaymentPolling } from "@/hooks/usePaymentPolling";
 import { useAuth } from "@/contexts/AuthContext";
+import { attachHostnameToSite, createDraftSite } from "@/lib/domain-utils";
 
 interface DomainResult {
   domain: string;
@@ -25,13 +26,20 @@ interface DomainResult {
 interface BuyDomainDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
+  targetSiteId?: string;
+  onDomainPurchased?: (domain: string, purchaseId: string | null) => void;
 }
 
 type DialogView = 'search' | 'payment' | 'processing' | 'success' | 'failed';
 
 const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
-const BuyDomainDialog = ({ open, onOpenChange }: BuyDomainDialogProps) => {
+const BuyDomainDialog = ({
+  open,
+  onOpenChange,
+  targetSiteId,
+  onDomainPurchased,
+}: BuyDomainDialogProps) => {
   const navigate = useNavigate();
   const { user } = useAuth();
   const [searchQuery, setSearchQuery] = useState("");
@@ -55,10 +63,10 @@ const BuyDomainDialog = ({ open, onOpenChange }: BuyDomainDialogProps) => {
     setView('success');
     setCurrentPurchaseId(null);
     
-    // Create site record for the purchased domain
+    // Link purchased domain to an existing site (when opened from SiteWizard)
+    // or create a fresh draft site record.
     if (user && selectedDomain) {
       try {
-        // Get the domain purchase ID
         const { data: purchaseData } = await supabase
           .from('domain_purchases')
           .select('id')
@@ -67,45 +75,38 @@ const BuyDomainDialog = ({ open, onOpenChange }: BuyDomainDialogProps) => {
           .eq('status', 'completed')
           .order('created_at', { ascending: false })
           .limit(1)
-          .single();
+          .maybeSingle();
 
-        // Generated database types are refreshed only after the migration is applied.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const db = supabase as any;
-        const { data: memberships, error: membershipError } = await db.from('organisation_members').select('organisation_id').eq('user_id', user.id).eq('status', 'active').in('role', ['tenant_owner', 'tenant_developer']).limit(1);
-        if (membershipError) throw membershipError;
-        let organisationId = memberships?.[0]?.organisation_id;
-        if (!organisationId) {
-          const created = await db.rpc('create_personal_organisation', { _name: `${user.email?.split('@')[0] || 'My'} sites` });
-          if (created.error) throw created.error;
-          organisationId = created.data;
-        }
+        const purchaseId = purchaseData?.id || null;
+        const normalized = selectedDomain.domain.toLowerCase();
 
-        // Create a tenant-owned site and its runtime domain record.
-        const { data: siteData, error: siteError } = await db
-          .from('sites')
-          .insert({
-            user_id: user.id,
-            organisation_id: organisationId,
-            name: selectedDomain.domain.split('.')[0],
-            domain_id: purchaseData?.id || null,
-            status: 'setup',
-          })
-          .select()
-          .single();
-
-        if (siteError) {
-          console.error('Error creating site:', siteError);
-        } else if (siteData) {
-          const { error: domainError } = await db.from('site_domains').insert({ site_id: siteData.id, hostname: selectedDomain.domain.toLowerCase(), is_primary: true, status: 'pending', is_verified: false });
-          if (domainError) throw domainError;
-          setCreatedSiteId(siteData.id);
+        if (targetSiteId) {
+          if (purchaseId) {
+            await supabase
+              .from('sites')
+              .update({ domain_id: purchaseId })
+              .eq('id', targetSiteId);
+          }
+          await attachHostnameToSite(targetSiteId, normalized);
+          setCreatedSiteId(targetSiteId);
+          onDomainPurchased?.(normalized, purchaseId);
+        } else {
+          const { siteId } = await createDraftSite({
+            userId: user.id,
+            email: user.email,
+            name: normalized.split('.')[0],
+            domainMode: 'buy_domain',
+            hostname: normalized,
+            domainId: purchaseId,
+          });
+          setCreatedSiteId(siteId);
+          onDomainPurchased?.(normalized, purchaseId);
         }
       } catch (err) {
         console.error('Error in payment success handler:', err);
       }
     }
-  }, [user, selectedDomain]);
+  }, [user, selectedDomain, targetSiteId, onDomainPurchased]);
 
   const handlePaymentFailure = useCallback((purchase: { failure_reason: string | null }) => {
     setFailureReason(purchase.failure_reason || 'Payment was not completed');
@@ -626,7 +627,10 @@ const BuyDomainDialog = ({ open, onOpenChange }: BuyDomainDialogProps) => {
 
             <Button
               onClick={() => {
-                if (createdSiteId && selectedDomain) {
+                if (targetSiteId) {
+                  resetDialog();
+                  onOpenChange(false);
+                } else if (createdSiteId && selectedDomain) {
                   resetDialog();
                   onOpenChange(false);
                   navigate(`/sites/${createdSiteId}/wizard`);
@@ -636,7 +640,7 @@ const BuyDomainDialog = ({ open, onOpenChange }: BuyDomainDialogProps) => {
               }}
               className="w-full btn-primary h-12 text-base"
             >
-              Continue Setup
+              {targetSiteId ? 'Use Domain in Setup' : 'Continue Setup'}
               <ArrowRight className="w-4 h-4 ml-2" />
             </Button>
           </div>

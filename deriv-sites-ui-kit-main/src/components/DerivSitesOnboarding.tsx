@@ -1,8 +1,11 @@
-import { ArrowLeft, ArrowRight, Bot, CreditCard, Globe, Palette, ShieldCheck } from "lucide-react";
+import { ArrowLeft, ArrowRight, Bot, CreditCard, Globe, Loader2, Palette, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
+import { useAuth } from "@/contexts/AuthContext";
+import { createDraftSite } from "@/lib/domain-utils";
+import { toast } from "sonner";
 
 type Plan = "partnership_monthly" | "one_time";
 
@@ -27,13 +30,39 @@ const workflow = [
   { icon: Palette, title: "Brand colors", text: "Choose the site colors and preview the trader UI." },
   { icon: Bot, title: "Free bots", text: "Import XML bots that show on the public Free Bots page." },
   { icon: ShieldCheck, title: "Deriv tools", text: "Select tools and configure the Deriv app scopes." },
-  { icon: Globe, title: "Domain", text: "Connect the domain after the site details are ready." },
+  { icon: Globe, title: "Domain", text: "Launch free on a .vercel.app URL, connect your own domain, or buy one." },
 ];
 
 const DerivSitesOnboarding = () => {
   const navigate = useNavigate();
+  const { user } = useAuth();
   const [selectedPlan, setSelectedPlan] = useState<Plan>("partnership_monthly");
   const [agreed, setAgreed] = useState(false);
+  const [creating, setCreating] = useState(false);
+
+  const handleStartSetup = async () => {
+    if (!user) {
+      toast.info("Sign in or create an account to start your site draft");
+      navigate("/auth");
+      return;
+    }
+
+    setCreating(true);
+    try {
+      const { siteId } = await createDraftSite({
+        userId: user.id,
+        email: user.email,
+        plan: selectedPlan,
+      });
+      toast.success("Site draft created. Let's configure your site.");
+      navigate(`/sites/${siteId}/wizard`);
+    } catch (error) {
+      toast.error(
+        error instanceof Error ? error.message : "Failed to create site draft",
+      );
+      setCreating(false);
+    }
+  };
 
   return (
     <div className="flex-1 bg-slate-50 px-4 pb-10 text-slate-950 sm:px-6 lg:px-8">
@@ -103,10 +132,32 @@ const DerivSitesOnboarding = () => {
             </span>
           </label>
 
-          <div className="mt-6 flex justify-end">
-            <Button disabled={!agreed} onClick={() => navigate("/domains")} className="rounded-md">
-              Continue to domain and site setup
-              <ArrowRight className="ml-2 h-4 w-4" />
+          <div className="mt-6 flex flex-wrap justify-end gap-3">
+            <Button
+              type="button"
+              variant="outline"
+              onClick={() => navigate("/domains")}
+              disabled={creating}
+              className="rounded-md"
+            >
+              Manage domains
+            </Button>
+            <Button
+              disabled={!agreed || creating}
+              onClick={handleStartSetup}
+              className="rounded-md"
+            >
+              {creating ? (
+                <>
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  Creating draft...
+                </>
+              ) : (
+                <>
+                  Start site setup
+                  <ArrowRight className="ml-2 h-4 w-4" />
+                </>
+              )}
             </Button>
           </div>
         </div>

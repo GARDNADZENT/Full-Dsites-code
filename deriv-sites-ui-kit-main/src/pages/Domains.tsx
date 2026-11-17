@@ -1,23 +1,72 @@
 import { useState, useEffect } from "react";
-import { useNavigate } from "react-router-dom";
-import { Globe, ShoppingCart, Settings, Check, Clock, XCircle, ExternalLink, Trash2, MessageCircle, ArrowRight } from "lucide-react";
+import { useNavigate, useSearchParams } from "react-router-dom";
+import { Globe, ShoppingCart, Settings, Check, Clock, XCircle, ExternalLink, Trash2, MessageCircle, ArrowRight, Sparkles, Link2, RefreshCw, Loader2 } from "lucide-react";
 import BuyDomainDialog from "@/components/BuyDomainDialog";
+import ConnectDomainDialog from "@/components/ConnectDomainDialog";
 import { useDomainPurchases } from "@/hooks/useDomainPurchases";
 import { useDashboard } from "@/hooks/useDashboard";
+import {
+  createDraftSite,
+  getDomainKindLabel,
+  getSitePrimaryDomainRecord,
+  getSitePrimaryHostname,
+  isVercelAppHostname,
+} from "@/lib/domain-utils";
+import { provisionSiteDomain } from "@/lib/site-runtime-config";
 import { format } from "date-fns";
 import { Button } from "@/components/ui/button";
 import { toast } from "sonner";
-import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 
 const Domains = () => {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const { user } = useAuth();
   const [isBuyDialogOpen, setIsBuyDialogOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState<'purchased' | 'configuration'>('purchased');
+  const [isConnectDialogOpen, setIsConnectDialogOpen] = useState(false);
+  const [connectMode, setConnectMode] = useState<'vercel_subdomain' | 'custom_domain'>('vercel_subdomain');
+  const [connectTargetSiteId, setConnectTargetSiteId] = useState<string | null>(null);
+  const [verifyingSiteId, setVerifyingSiteId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<'configuration' | 'purchased'>('configuration');
   const { completedPurchases, pendingPurchases, failedPurchases, loading, deletePurchase } = useDomainPurchases();
-  const { sites } = useDashboard();
+  const { sites, refetch: refetchSites } = useDashboard();
   const configuredSites = sites.filter(site => site.status !== 'deleted');
+
+  useEffect(() => {
+    if (searchParams.get('buy') === '1') {
+      setIsBuyDialogOpen(true);
+      setSearchParams({}, { replace: true });
+    }
+  }, [searchParams, setSearchParams]);
+
+  const openConnectDialog = (
+    mode: 'vercel_subdomain' | 'custom_domain',
+    siteId: string | null = null,
+  ) => {
+    setConnectMode(mode);
+    setConnectTargetSiteId(siteId);
+    setIsConnectDialogOpen(true);
+  };
+
+  const handleVerifySiteDomain = async (siteId: string, hostname: string) => {
+    setVerifyingSiteId(siteId);
+    try {
+      const action = isVercelAppHostname(hostname) ? 'attach' : 'verify';
+      const result = await provisionSiteDomain(siteId, { action, hostname });
+      await refetchSites();
+      if (result.domain?.isVerified) {
+        toast.success(`${hostname} is verified and active on Vercel!`);
+      } else {
+        toast.info(
+          `DNS for ${hostname} is not pointing to Vercel yet. Open the site wizard or Domain settings to review required records.`,
+        );
+      }
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Domain verification failed');
+    } finally {
+      setVerifyingSiteId(null);
+    }
+  };
 
   // Helper to check if domain has a site and its status
   const getDomainSiteStatus = (purchaseId: string) => {
@@ -28,46 +77,28 @@ const Domains = () => {
   const handleCompleteSetup = async (purchaseId: string, domainName: string) => {
     // Check if site exists for this domain
     const { exists, site } = getDomainSiteStatus(purchaseId);
-    
+
     if (exists && site) {
       navigate(`/sites/${site.id}/wizard`);
     } else {
-      // Create a new site and navigate to setup
       if (!user) {
         toast.error('Please log in to continue');
         return;
       }
 
       try {
-        // Generated database types are refreshed only after the migration is applied.
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const db = supabase as any;
-        const { data: memberships, error: membershipError } = await db.from('organisation_members').select('organisation_id').eq('user_id', user.id).eq('status', 'active').in('role', ['tenant_owner', 'tenant_developer']).limit(1);
-        if (membershipError) throw membershipError;
-        let organisationId = memberships?.[0]?.organisation_id;
-        if (!organisationId) {
-          const created = await db.rpc('create_personal_organisation', { _name: `${user.email?.split('@')[0] || 'My'} sites` });
-          if (created.error) throw created.error;
-          organisationId = created.data;
-        }
-        const { data: newSite, error } = await db
-          .from('sites')
-          .insert({
-            user_id: user.id,
-            organisation_id: organisationId,
-            domain_id: purchaseId,
-            name: domainName,
-            status: 'draft'
-          })
-          .select()
-          .single();
-
-        if (error) throw error;
-        
-        navigate(`/sites/${newSite.id}/wizard`);
+        const { siteId } = await createDraftSite({
+          userId: user.id,
+          email: user.email,
+          name: domainName,
+          domainMode: 'buy_domain',
+          hostname: domainName,
+          domainId: purchaseId,
+        });
+        navigate(`/sites/${siteId}/wizard`);
       } catch (err) {
         console.error('Error creating site:', err);
-        toast.error('Failed to start setup');
+        toast.error(err instanceof Error ? err.message : 'Failed to start setup');
       }
     }
   };
@@ -117,47 +148,65 @@ const Domains = () => {
   return (
     <div className="flex-1 flex flex-col">
       {/* Header */}
-      <header className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4 py-4 sm:py-6 px-4 sm:px-6 lg:px-8">
+      <header className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-4 py-4 sm:py-6 px-4 sm:px-6 lg:px-8">
         <div>
           <h1 className="text-lg sm:text-2xl font-semibold text-foreground">Domains</h1>
           <p className="text-xs sm:text-sm text-muted-foreground">
-            Manage purchased domains and configure site domains
+            Use a free <code className="text-foreground">.vercel.app</code> subdomain, connect a domain you already own, or purchase a new domain
           </p>
         </div>
 
-        <button 
-          onClick={() => setIsBuyDialogOpen(true)}
-          className="btn-primary flex items-center justify-center gap-2 group w-full sm:w-auto"
-        >
-          <ShoppingCart className="w-4 h-4" />
-          <span>Buy Domain</span>
-        </button>
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            onClick={() => openConnectDialog('vercel_subdomain', null)}
+            className="btn-primary flex items-center justify-center gap-2 text-sm px-3.5 py-2"
+          >
+            <Sparkles className="w-4 h-4" />
+            <span>Free Vercel URL</span>
+          </button>
+          <Button
+            variant="outline"
+            onClick={() => openConnectDialog('custom_domain', null)}
+            className="border-white/15 bg-white/5 hover:bg-white/10 text-foreground"
+          >
+            <Link2 className="w-4 h-4 mr-2" />
+            Connect Own Domain
+          </Button>
+          <Button
+            variant="outline"
+            onClick={() => setIsBuyDialogOpen(true)}
+            className="border-white/15 hover:bg-white/10 text-foreground"
+          >
+            <ShoppingCart className="w-4 h-4 mr-2" />
+            Buy Domain
+          </Button>
+        </div>
       </header>
 
       {/* Tabs */}
       <div className="px-4 sm:px-6 lg:px-8 pb-4 overflow-x-auto">
         <div className="flex gap-2 min-w-max">
-          <button 
+          <button
+            onClick={() => setActiveTab('configuration')}
+            className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
+              activeTab === 'configuration'
+                ? 'bg-primary/20 text-foreground border border-primary/30'
+                : 'bg-muted/30 text-muted-foreground hover:bg-muted/50'
+            }`}
+          >
+            <Globe className="w-4 h-4" />
+            <span>Site Domains ({configuredSites.length})</span>
+          </button>
+          <button
             onClick={() => setActiveTab('purchased')}
             className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
-              activeTab === 'purchased' 
-                ? 'bg-primary/20 text-foreground border border-primary/30' 
+              activeTab === 'purchased'
+                ? 'bg-primary/20 text-foreground border border-primary/30'
                 : 'bg-muted/30 text-muted-foreground hover:bg-muted/50'
             }`}
           >
             <ShoppingCart className="w-4 h-4" />
-            <span>Purchased ({completedPurchases.length})</span>
-          </button>
-          <button 
-            onClick={() => setActiveTab('configuration')}
-            className={`flex items-center gap-2 px-3 sm:px-4 py-2 rounded-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
-              activeTab === 'configuration' 
-                ? 'bg-primary/20 text-foreground border border-primary/30' 
-                : 'bg-muted/30 text-muted-foreground hover:bg-muted/50'
-            }`}
-          >
-            <Settings className="w-4 h-4" />
-            <span>Configuration ({configuredSites.length})</span>
+            <span>Purchased ({completedPurchases.length + pendingPurchases.length})</span>
           </button>
         </div>
       </div>
@@ -366,71 +415,209 @@ const Domains = () => {
               </div>
 
               <h2 className="text-lg sm:text-xl font-semibold text-foreground mb-2 text-center">
-                No domains yet
+                No purchased domains yet
               </h2>
 
               <p className="text-muted-foreground text-center max-w-md mb-6 text-sm sm:text-base">
-                Purchase your first domain to get started
+                Buying a domain is optional. You can start free on a <code className="text-foreground">.vercel.app</code> URL, connect a domain you already own, or buy one here.
               </p>
 
-              <button 
-                onClick={() => setIsBuyDialogOpen(true)}
-                className="btn-primary flex items-center gap-2 px-4 sm:px-5 py-2 sm:py-2.5 group text-sm sm:text-base"
-              >
-                <ShoppingCart className="w-4 h-4" />
-                <span>Buy Your First Domain</span>
-              </button>
+              <div className="flex flex-wrap items-center justify-center gap-2.5">
+                <button
+                  onClick={() => openConnectDialog('vercel_subdomain', null)}
+                  className="btn-primary flex items-center gap-2 px-4 py-2.5 text-sm"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  <span>Use Free Vercel URL</span>
+                </button>
+                <Button
+                  variant="outline"
+                  onClick={() => openConnectDialog('custom_domain', null)}
+                  className="border-white/15 bg-white/5 hover:bg-white/10"
+                >
+                  <Link2 className="w-4 h-4 mr-2" />
+                  Connect Own Domain
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => setIsBuyDialogOpen(true)}
+                  className="border-white/15 hover:bg-white/10"
+                >
+                  <ShoppingCart className="w-4 h-4 mr-2" />
+                  Buy Domain
+                </Button>
+              </div>
             </div>
           )
         ) : (
           configuredSites.length > 0 ? (
             <div className="space-y-3">
-              {configuredSites.map(site => (
-                <div
-                  key={site.id}
-                  className="p-4 rounded-xl border border-white/10 bg-panel-bg hover:border-primary/30 transition-colors"
-                >
-                  <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-                    <div>
-                      <p className="font-medium text-foreground">{site.name}</p>
-                      <p className="text-sm text-muted-foreground">
-                        {site.domain_purchases?.domain_name || "No linked purchased domain yet"}
-                      </p>
+              {configuredSites.map(site => {
+                const hostname = getSitePrimaryHostname(site);
+                const domainRecord = getSitePrimaryDomainRecord(site);
+                const kindLabel = getDomainKindLabel(site, hostname);
+                const isVerified = Boolean(domainRecord?.is_verified);
+                const isActive = domainRecord?.status === 'active';
+
+                return (
+                  <div
+                    key={site.id}
+                    className="p-4 rounded-xl border border-white/10 bg-panel-bg hover:border-primary/30 transition-colors"
+                  >
+                    <div className="flex flex-col lg:flex-row lg:items-center lg:justify-between gap-3">
+                      <div className="space-y-1 min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="font-medium text-foreground truncate">{site.name}</p>
+                          <span className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] text-foreground">
+                            {kindLabel}
+                          </span>
+                          {hostname ? (
+                            <span
+                              className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${
+                                isActive
+                                  ? 'bg-emerald-500/15 text-emerald-400'
+                                  : isVerified
+                                    ? 'bg-sky-500/15 text-sky-400'
+                                    : 'bg-amber-500/15 text-amber-400'
+                              }`}
+                            >
+                              {isActive
+                                ? 'Active + SSL'
+                                : isVerified
+                                  ? 'Verified'
+                                  : isVercelAppHostname(hostname)
+                                    ? 'Ready to claim on Vercel'
+                                    : 'Pending DNS'}
+                            </span>
+                          ) : null}
+                        </div>
+                        <p className="text-sm text-muted-foreground break-all">
+                          {hostname ? `https://${hostname}` : 'No domain connected yet — choose a free Vercel URL or connect your own'}
+                        </p>
+                      </div>
+
+                      <div className="flex flex-wrap items-center gap-2">
+                        {hostname && !isVerified ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            disabled={verifyingSiteId === site.id}
+                            onClick={() => handleVerifySiteDomain(site.id, hostname)}
+                            className="border-white/15 hover:bg-white/10"
+                          >
+                            {verifyingSiteId === site.id ? (
+                              <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" />
+                            ) : (
+                              <RefreshCw className="w-3.5 h-3.5 mr-1.5" />
+                            )}
+                            {isVercelAppHostname(hostname) ? 'Activate on Vercel' : 'Verify DNS'}
+                          </Button>
+                        ) : null}
+
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            openConnectDialog(
+                              hostname && !isVercelAppHostname(hostname)
+                                ? 'custom_domain'
+                                : 'vercel_subdomain',
+                              site.id,
+                            )
+                          }
+                          className="border-white/15 hover:bg-white/10"
+                        >
+                          <Globe className="w-3.5 h-3.5 mr-1.5" />
+                          {hostname ? 'Change Domain' : 'Connect Domain'}
+                        </Button>
+
+                        {hostname && isActive ? (
+                          <Button
+                            variant="outline"
+                            size="sm"
+                            onClick={() => window.open(`https://${hostname}`, '_blank')}
+                            className="border-white/15 hover:bg-white/10"
+                          >
+                            <ExternalLink className="w-3.5 h-3.5 mr-1.5" />
+                            Visit
+                          </Button>
+                        ) : null}
+
+                        <Button
+                          size="sm"
+                          onClick={() => navigate(`/sites/${site.id}/wizard`)}
+                          className="btn-primary"
+                        >
+                          <Settings className="w-3.5 h-3.5 mr-1.5" />
+                          Setup Wizard
+                        </Button>
+                      </div>
                     </div>
-                    <Button
-                      onClick={() => navigate(`/sites/${site.id}/wizard`)}
-                      className="btn-primary h-9 px-4 text-sm"
-                    >
-                      <Settings className="w-4 h-4 mr-2" />
-                      Manage Config
-                    </Button>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           ) : (
             <div className="dashed-border rounded-2xl panel-bg min-h-[300px] sm:min-h-[400px] flex flex-col items-center justify-center p-6 sm:p-12">
               <div className="relative mb-6">
                 <div className="w-12 h-12 sm:w-16 sm:h-16 rounded-full gradient-purple flex items-center justify-center glow-purple-subtle">
-                  <Settings className="w-6 h-6 sm:w-8 sm:h-8 text-foreground" />
+                  <Globe className="w-6 h-6 sm:w-8 sm:h-8 text-foreground" />
                 </div>
+                <div className="absolute inset-0 -m-2 rounded-full border border-primary/30 animate-pulse" />
+                <div className="absolute inset-0 -m-4 rounded-full border border-primary/20" />
               </div>
 
               <h2 className="text-lg sm:text-xl font-semibold text-foreground mb-2 text-center">
-                No domain configurations
+                Launch your first site
               </h2>
 
-              <p className="text-muted-foreground text-center max-w-md text-sm sm:text-base">
-                Domain configurations will appear here once you configure domains for your sites
+              <p className="text-muted-foreground text-center max-w-md mb-6 text-sm sm:text-base">
+                Start instantly with a free <code className="text-foreground">.vercel.app</code> subdomain, connect a domain you already own, or buy a new domain.
               </p>
+
+              <div className="flex flex-wrap items-center justify-center gap-2.5">
+                <button
+                  onClick={() => openConnectDialog('vercel_subdomain', null)}
+                  className="btn-primary flex items-center gap-2 px-4 py-2.5 text-sm"
+                >
+                  <Sparkles className="w-4 h-4" />
+                  <span>Free Vercel Subdomain</span>
+                </button>
+                <Button
+                  variant="outline"
+                  onClick={() => openConnectDialog('custom_domain', null)}
+                  className="border-white/15 bg-white/5 hover:bg-white/10"
+                >
+                  <Link2 className="w-4 h-4 mr-2" />
+                  Connect Existing Domain
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => setIsBuyDialogOpen(true)}
+                  className="border-white/15 hover:bg-white/10"
+                >
+                  <ShoppingCart className="w-4 h-4 mr-2" />
+                  Buy a Domain
+                </Button>
+              </div>
             </div>
           )
         )}
       </div>
 
-      <BuyDomainDialog 
-        open={isBuyDialogOpen} 
-        onOpenChange={setIsBuyDialogOpen} 
+      <ConnectDomainDialog
+        open={isConnectDialogOpen}
+        onOpenChange={setIsConnectDialogOpen}
+        initialMode={connectMode}
+        targetSiteId={connectTargetSiteId}
+        sites={configuredSites}
+        onConnected={() => refetchSites()}
+        onSwitchToBuy={() => setIsBuyDialogOpen(true)}
+      />
+
+      <BuyDomainDialog
+        open={isBuyDialogOpen}
+        onOpenChange={setIsBuyDialogOpen}
       />
     </div>
   );

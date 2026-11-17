@@ -7,6 +7,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useState, useEffect } from "react";
 import { useToast } from "@/hooks/use-toast";
 import { useDashboard } from "@/hooks/useDashboard";
+import { getSitePrimaryHostname } from "@/lib/domain-utils";
 
 const Settings = () => {
   const { user } = useAuth();
@@ -138,7 +139,7 @@ const Settings = () => {
                 <div className="flex-1">
                   <p className="text-sm font-medium text-green-400 mb-1">Connected</p>
                   <p className="text-sm text-muted-foreground mb-2">
-                    Your Deriv App ID is configured for {activeSite?.domain_purchases?.domain_name || activeSite?.name}
+                    Your Deriv App ID is configured for {getSitePrimaryHostname(activeSite) || activeSite?.name}
                   </p>
                   <div className="flex items-center gap-2">
                     <code className="px-2 py-1 rounded bg-white/10 text-foreground text-sm">
@@ -168,7 +169,7 @@ const Settings = () => {
               <div>
                 <p className="text-sm font-medium text-amber-400 mb-1">Not Connected</p>
                 <p className="text-sm text-amber-400/80">
-                  Complete the setup for one of your domains to connect your Deriv API.
+                  Complete the setup wizard for one of your sites to connect your Deriv API.
                 </p>
               </div>
             </div>

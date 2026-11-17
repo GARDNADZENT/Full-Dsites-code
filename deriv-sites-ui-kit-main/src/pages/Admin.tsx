@@ -29,6 +29,12 @@ interface Site {
   domain_purchases: {
     domain_name: string;
   } | null;
+  site_domains?: Array<{
+    hostname: string;
+    is_primary: boolean;
+    status: string;
+    is_verified: boolean;
+  }> | null;
   profiles: {
     email: string;
     display_name: string | null;
@@ -79,6 +85,7 @@ const Admin = () => {
         .select(`
           *,
           domain_purchases(domain_name),
+          site_domains(hostname, is_primary, status, is_verified),
           xml_bots(id, file_name, file_path, display_order)
         `)
         .order('created_at', { ascending: false });
@@ -368,14 +375,20 @@ const Admin = () => {
 
       if (error) throw error;
 
-      // Send email notification to site owner
-      if (site.profiles?.email && site.domain_purchases?.domain_name) {
+      // Send email notification to site owner (supports .vercel.app, BYO domain, and purchased domain)
+      const siteHostname =
+        site.site_domains?.find(d => d.is_primary)?.hostname ||
+        site.site_domains?.[0]?.hostname ||
+        site.domain_purchases?.domain_name ||
+        null;
+
+      if (site.profiles?.email && siteHostname) {
         try {
           const { error: emailError } = await supabase.functions.invoke('send-site-live-email', {
             body: {
               email: site.profiles.email,
               siteName: site.name,
-              domainName: site.domain_purchases.domain_name,
+              domainName: siteHostname,
             }
           });
 
@@ -857,12 +870,19 @@ const SiteCard = ({ site, getStatusBadge, onActivate, isActivating, isLive, isEx
             </div>
             
             <div className="space-y-1 text-sm">
-              {site.domain_purchases?.domain_name && (
-                <div className="flex items-center gap-2 text-muted-foreground">
-                  <Globe className="w-3.5 h-3.5" />
-                  <span>{site.domain_purchases.domain_name}</span>
-                </div>
-              )}
+              {(() => {
+                const primaryHost =
+                  site.site_domains?.find(d => d.is_primary)?.hostname ||
+                  site.site_domains?.[0]?.hostname ||
+                  site.domain_purchases?.domain_name;
+                if (!primaryHost) return null;
+                return (
+                  <div className="flex items-center gap-2 text-muted-foreground">
+                    <Globe className="w-3.5 h-3.5" />
+                    <span>{primaryHost}</span>
+                  </div>
+                );
+              })()}
               
               {site.deriv_affiliate_id && (
                 <div className="flex items-center gap-2 text-muted-foreground">
@@ -915,16 +935,23 @@ const SiteCard = ({ site, getStatusBadge, onActivate, isActivating, isLive, isEx
               </Button>
             )}
             
-            {isLive && site.domain_purchases?.domain_name && (
-              <Button
-                variant="outline"
-                size="sm"
-                onClick={() => window.open(`https://${site.domain_purchases?.domain_name}`, '_blank')}
-              >
-                <ExternalLink className="w-4 h-4 mr-1" />
-                Visit
-              </Button>
-            )}
+            {(() => {
+              const visitHost =
+                site.site_domains?.find(d => d.is_primary)?.hostname ||
+                site.site_domains?.[0]?.hostname ||
+                site.domain_purchases?.domain_name;
+              if (!isLive || !visitHost) return null;
+              return (
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={() => window.open(`https://${visitHost}`, '_blank')}
+                >
+                  <ExternalLink className="w-4 h-4 mr-1" />
+                  Visit
+                </Button>
+              );
+            })()}
           </div>
         </div>
       </div>

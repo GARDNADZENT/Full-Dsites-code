@@ -8,27 +8,27 @@
   "rewrites": [
     {
       "source": "/api/deriv-oauth-start",
-      "destination": "https://fanrhtqyjajhacrmrbfv.supabase.co/functions/v1/deriv-oauth-start"
+      "destination": "https://dsites-backend.vercel.app/api/deriv-oauth-start"
     },
     {
       "source": "/api/deriv-oauth-callback",
-      "destination": "https://fanrhtqyjajhacrmrbfv.supabase.co/functions/v1/deriv-oauth-callback"
+      "destination": "https://dsites-backend.vercel.app/api/deriv-oauth-callback"
     },
     {
       "source": "/api/deriv-trader-session",
-      "destination": "https://fanrhtqyjajhacrmrbfv.supabase.co/functions/v1/deriv-trader-session"
+      "destination": "https://dsites-backend.vercel.app/api/deriv-trader-session"
     },
     {
       "source": "/api/deriv-trader-accounts",
-      "destination": "https://fanrhtqyjajhacrmrbfv.supabase.co/functions/v1/deriv-trader-accounts"
+      "destination": "https://dsites-backend.vercel.app/api/deriv-trader-accounts"
     },
     {
       "source": "/api/deriv-trader-otp",
-      "destination": "https://fanrhtqyjajhacrmrbfv.supabase.co/functions/v1/deriv-trader-otp"
+      "destination": "https://dsites-backend.vercel.app/api/deriv-trader-otp"
     },
     {
       "source": "/api/public-site-config",
-      "destination": "https://fanrhtqyjajhacrmrbfv.supabase.co/functions/v1/public-site-config"
+      "destination": "https://dsites-backend.vercel.app/api/public-site-config"
     },
     {
       "source": "/((?!api/|site\\.config\\.json).*)",
