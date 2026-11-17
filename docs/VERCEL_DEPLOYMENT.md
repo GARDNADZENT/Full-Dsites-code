@@ -13,7 +13,7 @@ All browser frontends and the optional community API deploy directly from this s
 
 ## 1. Update Your Supabase Project Ref (If Changed)
 
-If you use a different Supabase project than `tsidnkyizypwlxtkkoyd`, replace `tsidnkyizypwlxtkkoyd` in:
+If you use a different Supabase project than `fanrhtqyjajhacrmrbfv`, replace `fanrhtqyjajhacrmrbfv` in:
 - `deriv-sites-ui-kit-main/supabase/config.toml`
 - `deriv-sites-ui-kit-main/vercel.json`
 - `new-user-interface-main/vercel.json`

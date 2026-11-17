@@ -32,7 +32,15 @@ app.use(
 );
 app.use(express.json());
 
-// Health check endpoint
+// Root & health check endpoints
+app.get('/', (req, res) => {
+    res.json({
+        status: 'OK',
+        service: 'dsites-backend',
+        endpoints: ['/health', '/api/bot-ideas', '/api/best-bot-stats', '/api/scanner/signal'],
+    });
+});
+
 app.get('/health', (req, res) => {
     res.json({ status: 'OK', message: 'API server is running' });
 });
