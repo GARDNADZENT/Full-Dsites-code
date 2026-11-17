@@ -10,6 +10,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useAdminRole } from "@/hooks/useAdminRole";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import AdminMarkupStats from "@/components/AdminMarkupStats";
+import AdminDerivAppPool from "@/components/AdminDerivAppPool";
 interface XmlBot {
   id: string;
   file_name: string;
@@ -22,6 +23,11 @@ interface Site {
   name: string;
   status: string;
   deriv_affiliate_id: string | null;
+  deriv_mode?: string | null;
+  requested_markup_rate?: number | null;
+  platform_fee_rate?: number | null;
+  owner_deriv_loginid?: string | null;
+  platform_deriv_app_id?: string | null;
   pending_reason: string | null;
   deleted_bot_name: string | null;
   created_at: string;
@@ -501,6 +507,10 @@ const Admin = () => {
           {canViewFinance && <TabsTrigger value="finance" className="data-[state=active]:bg-white/10">
             Markup
           </TabsTrigger>}
+          {isAdmin && <TabsTrigger value="deriv-pool" className="data-[state=active]:bg-white/10">
+            <Key className="w-4 h-4 mr-2" />
+            Deriv Pool
+          </TabsTrigger>}
         </TabsList>
 
         {/* Sites Tab */}
@@ -836,6 +846,10 @@ const Admin = () => {
         {canViewFinance && <TabsContent value="finance" className="space-y-4">
           <AdminMarkupStats enabled={canViewFinance} />
         </TabsContent>}
+
+        {isAdmin && <TabsContent value="deriv-pool">
+          <AdminDerivAppPool />
+        </TabsContent>}
       </Tabs>
     </div>
   );
@@ -864,6 +878,13 @@ const SiteCard = ({ site, getStatusBadge, onActivate, isActivating, isLive, isEx
             <div className="flex items-center gap-2 mb-2">
               <h3 className="font-semibold text-foreground truncate">{site.name}</h3>
               {getStatusBadge(site.status)}
+              {site.deriv_mode === "custom" ? (
+                <span className="px-2 py-1 rounded-full text-xs bg-white/10 text-muted-foreground">Custom app</span>
+              ) : (
+                <span className="px-2 py-1 rounded-full text-xs bg-primary/20 text-primary">
+                  {site.requested_markup_rate != null ? `${Number(site.requested_markup_rate)}% markup` : "Pool"}
+                </span>
+              )}
               {site.status === 'pending' && (
                 <PendingReasonBadge reason={site.pending_reason || 'new_site'} deletedBotName={site.deleted_bot_name} />
               )}

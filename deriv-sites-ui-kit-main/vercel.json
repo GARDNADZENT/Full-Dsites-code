@@ -6,8 +6,16 @@
   "outputDirectory": "dist",
   "rewrites": [
     {
+      "source": "/api/deriv-oauth-start",
+      "destination": "https://fanrhtqyjajhacrmrbfv.supabase.co/functions/v1/deriv-oauth-start"
+    },
+    {
       "source": "/api/deriv-oauth-callback",
       "destination": "https://fanrhtqyjajhacrmrbfv.supabase.co/functions/v1/deriv-oauth-callback"
+    },
+    {
+      "source": "/api/manage-platform-deriv",
+      "destination": "https://fanrhtqyjajhacrmrbfv.supabase.co/functions/v1/manage-platform-deriv"
     },
     {
       "source": "/((?!api/|assets/|favicon\\.ico).*)",

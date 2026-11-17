@@ -212,17 +212,20 @@ async function exchangeAuthorizationCode(input: {
   clientId: string;
   redirectUri: string;
   codeVerifier: string;
+  clientSecret?: string | null;
 }): Promise<TokenResponse> {
+  const params = new URLSearchParams({
+    grant_type: 'authorization_code',
+    code: input.code,
+    client_id: input.clientId,
+    redirect_uri: input.redirectUri,
+    code_verifier: input.codeVerifier,
+  });
+  if (input.clientSecret) params.set('client_secret', input.clientSecret);
   const response = await fetch(DERIV_TOKEN_URL, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-    body: new URLSearchParams({
-      grant_type: 'authorization_code',
-      code: input.code,
-      client_id: input.clientId,
-      redirect_uri: input.redirectUri,
-      code_verifier: input.codeVerifier,
-    }),
+    body: params,
   });
   if (!response.ok) throw Object.assign(new Error('Deriv token exchange failed'), await parseError(response));
   return await response.json();
@@ -333,14 +336,77 @@ const redirectWithError = (origin: string, path: string, code: string, id: strin
   return Response.redirect(target.toString(), 302);
 };
 
+const resolveRequestHostname = (req: Request, url: URL): string => {
+  const forwarded = req.headers.get('x-forwarded-host')?.split(',')[0]?.trim().toLowerCase();
+  if (forwarded) return forwarded.replace(/:\d+$/, '');
+  return url.hostname.toLowerCase();
+};
+
 Deno.serve(async req => {
   const id = correlationId();
   const url = new URL(req.url);
   if (req.method !== 'GET') return new Response(JSON.stringify(safeError('method_not_allowed', 'Method not allowed', id)), { status: 405 });
+
+  const admin = supabaseAdmin();
+
+  // Cross-domain single-use session handoff: completes central superuser OAuth
+  // by setting a first-party HttpOnly trader session cookie on the exact tenant domain.
+  const handoffToken = url.searchParams.get('handoff');
+  if (handoffToken) {
+    const handoffHash = await sha256(handoffToken);
+    const { data: handoff } = await admin
+      .from('oauth_session_handoffs')
+      .select('*')
+      .eq('handoff_hash', handoffHash)
+      .is('consumed_at', null)
+      .gt('expires_at', new Date().toISOString())
+      .maybeSingle();
+
+    if (!handoff) {
+      return new Response(
+        JSON.stringify(safeError('handoff_invalid', 'Login session handoff is invalid or expired', id)),
+        { status: 400, headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' } },
+      );
+    }
+
+    const expectedHost = new URL(handoff.origin).hostname.toLowerCase();
+    const requestHost = resolveRequestHostname(req, url);
+    if (requestHost !== expectedHost) {
+      return redirectWithError(handoff.origin, handoff.return_path, 'handoff_host_mismatch', id);
+    }
+
+    const { data: consumedHandoff } = await admin
+      .from('oauth_session_handoffs')
+      .update({ consumed_at: new Date().toISOString() })
+      .eq('id', handoff.id)
+      .is('consumed_at', null)
+      .select('id');
+
+    if (!consumedHandoff?.length) {
+      return redirectWithError(handoff.origin, handoff.return_path, 'callback_replayed', id);
+    }
+
+    try {
+      const rawSession = await decryptSecret(handoff.session_token_encrypted);
+      const target = new URL(handoff.return_path, handoff.origin);
+      target.searchParams.set('auth', 'connected');
+      return new Response(null, {
+        status: 302,
+        headers: {
+          Location: target.toString(),
+          'Set-Cookie': traderCookie(rawSession, Number(handoff.session_max_age) || 3600),
+          'Cache-Control': 'no-store',
+        },
+      });
+    } catch (error) {
+      console.error('deriv-oauth-callback handoff failed', { correlationId: id, error });
+      return redirectWithError(handoff.origin, handoff.return_path, 'handoff_failed', id);
+    }
+  }
+
   const state = url.searchParams.get('state');
   if (!state) return new Response(JSON.stringify(safeError('state_missing', 'OAuth state is missing', id)), { status: 400, headers: { 'Content-Type': 'application/json' } });
 
-  const admin = supabaseAdmin();
   const { data: transaction } = await admin
     .from('deriv_oauth_transactions')
     .select('*, application:deriv_applications(*)')
@@ -368,11 +434,24 @@ Deno.serve(async req => {
   }
 
   try {
+    let clientSecret: string | null = null;
+    if (transaction.application.platform_deriv_app_id) {
+      const { data: poolApp } = await admin
+        .from('platform_deriv_apps')
+        .select('client_secret_encrypted')
+        .eq('id', transaction.application.platform_deriv_app_id)
+        .maybeSingle();
+      if (poolApp?.client_secret_encrypted) {
+        clientSecret = await decryptSecret(poolApp.client_secret_encrypted);
+      }
+    }
+
     const token = await exchangeAuthorizationCode({
       code,
       clientId: transaction.application.oauth_client_id,
       redirectUri: transaction.application.callback_uri,
       codeVerifier: await decryptSecret(transaction.code_verifier_encrypted),
+      clientSecret,
     });
     if (!token.access_token) throw new Error('Token response did not include an access token');
 
@@ -421,6 +500,35 @@ Deno.serve(async req => {
     }, { onConflict: 'site_id,subject_hash' }).select('id').single();
     if (tokenError || !tokenRecord) throw tokenError || new Error('Token storage failed');
 
+    // Best-effort trader attribution right at login time for DForge-style per-site markup commission splits.
+    if (grantedScopes.includes('trade')) {
+      try {
+        const accountsRes = await derivRequest<{ data?: Array<Record<string, unknown>> }>('/trading/v1/options/accounts', {
+          accessToken: token.access_token,
+          appId: transaction.application.app_id,
+        });
+        const nowIso = new Date().toISOString();
+        const attrRows = (Array.isArray(accountsRes?.data) ? accountsRes.data : [])
+          .map(acc => ({
+            site_id: transaction.site_id,
+            organisation_id: transaction.organisation_id,
+            platform_deriv_app_id: transaction.application.platform_deriv_app_id || null,
+            deriv_app_id: transaction.application.app_id,
+            deriv_loginid: String(acc.account_id || '').toUpperCase(),
+            account_type: acc.account_type === 'real' ? 'real' : 'demo',
+            currency: typeof acc.currency === 'string' ? acc.currency : '',
+            last_seen_at: nowIso,
+            updated_at: nowIso,
+          }))
+          .filter(row => row.deriv_loginid);
+        if (attrRows.length > 0) {
+          await admin.from('site_trader_attributions').upsert(attrRows, { onConflict: 'site_id,deriv_loginid' });
+        }
+      } catch (attrErr) {
+        console.warn('deriv-oauth-callback trader attribution skipped', { correlationId: id, attrErr });
+      }
+    }
+
     const rawSession = randomSecret(48);
     const rawCsrf = randomSecret(32);
     const sessionSeconds = token.refresh_token ? 7 * 24 * 60 * 60 : Math.max(60, token.expires_in || 3600);
@@ -437,7 +545,38 @@ Deno.serve(async req => {
     });
     if (sessionError) throw sessionError;
 
-    await audit({ organisationId: transaction.organisation_id, siteId: transaction.site_id, actorType: 'trader', action: 'trader.oauth.completed', provider: 'deriv', correlationId: id, metadata: { scopes: grantedScopes } });
+    await audit({ organisationId: transaction.organisation_id, siteId: transaction.site_id, actorType: 'trader', action: 'trader.oauth.completed', provider: 'deriv', correlationId: id, metadata: { scopes: grantedScopes, appId: transaction.application.app_id, sourceType: transaction.application.source_type || 'custom' } });
+
+    const targetHost = new URL(transaction.origin).hostname.toLowerCase();
+    const callbackHost = resolveRequestHostname(req, url);
+
+    // If handled on the central superuser callback host (e.g. dsites-admin.vercel.app) for a
+    // customer site domain (e.g. gadtrader.vercel.app or mybrand.com), issue a 60s single-use
+    // handoff so the tenant domain sets its own first-party HttpOnly session cookie cleanly.
+    if (callbackHost !== targetHost) {
+      const rawHandoff = randomSecret(40);
+      const { error: handoffErr } = await admin.from('oauth_session_handoffs').insert({
+        handoff_hash: await sha256(rawHandoff),
+        site_id: transaction.site_id,
+        organisation_id: transaction.organisation_id,
+        origin: transaction.origin,
+        return_path: transaction.return_path,
+        session_token_encrypted: await encryptSecret(rawSession),
+        session_max_age: sessionSeconds,
+        expires_at: new Date(Date.now() + 60_000).toISOString(),
+      });
+      if (handoffErr) throw handoffErr;
+      const handoffUrl = new URL('/api/deriv-oauth-callback', transaction.origin);
+      handoffUrl.searchParams.set('handoff', rawHandoff);
+      return new Response(null, {
+        status: 302,
+        headers: {
+          Location: handoffUrl.toString(),
+          'Cache-Control': 'no-store',
+        },
+      });
+    }
+
     const target = new URL(transaction.return_path, transaction.origin);
     target.searchParams.set('auth', 'connected');
     return new Response(null, {

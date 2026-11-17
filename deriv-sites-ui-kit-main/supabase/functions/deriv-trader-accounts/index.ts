@@ -347,6 +347,30 @@ Deno.serve(async req => {
       group: typeof account.group === 'string' ? account.group : '',
       status: typeof account.status === 'string' ? account.status : '',
     })).filter(account => account.account_id);
+
+    // Keep DForge-style per-site trader attribution fresh for commission splitting.
+    if (data.length > 0) {
+      try {
+        const nowIso = new Date().toISOString();
+        await supabaseAdmin().from('site_trader_attributions').upsert(
+          data.map(acc => ({
+            site_id: context.session.site_id,
+            organisation_id: context.session.organisation_id,
+            platform_deriv_app_id: context.session.token.application.platform_deriv_app_id || null,
+            deriv_app_id: context.session.token.application.app_id,
+            deriv_loginid: acc.account_id.toUpperCase(),
+            account_type: acc.account_type,
+            currency: acc.currency,
+            last_seen_at: nowIso,
+            updated_at: nowIso,
+          })),
+          { onConflict: 'site_id,deriv_loginid' },
+        );
+      } catch (attrErr) {
+        console.warn('deriv-trader-accounts attribution upsert skipped', { correlationId: id, attrErr });
+      }
+    }
+
     return json({ data, correlationId: id }, 200, origin);
   } catch (error) {
     const status = Number((error as { status?: number }).status) || 502;

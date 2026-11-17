@@ -356,6 +356,21 @@ Deno.serve(async req => {
     if (socketUrl.protocol !== 'wss:' || socketUrl.hostname !== 'api.derivws.com') {
       throw Object.assign(new Error('Deriv returned an invalid WebSocket endpoint'), { code: 'otp_endpoint_invalid', status: 502 });
     }
+    try {
+      const nowIso = new Date().toISOString();
+      await supabaseAdmin().from('site_trader_attributions').upsert({
+        site_id: context.session.site_id,
+        organisation_id: context.session.organisation_id,
+        platform_deriv_app_id: context.session.token.application.platform_deriv_app_id || null,
+        deriv_app_id: context.session.token.application.app_id,
+        deriv_loginid: accountId,
+        account_type: accountId.startsWith('VRTC') || accountId.startsWith('VRW') ? 'demo' : 'real',
+        last_seen_at: nowIso,
+        updated_at: nowIso,
+      }, { onConflict: 'site_id,deriv_loginid' });
+    } catch (attrErr) {
+      console.warn('deriv-trader-otp attribution upsert skipped', { correlationId: id, attrErr });
+    }
     await audit({ organisationId: context.session.organisation_id, siteId: context.session.site_id, actorType: 'trader', action: 'trader.websocket.otp_issued', provider: 'deriv', correlationId: id, metadata: { accountId } });
     return json({ data: { url: socketUrl.toString() }, correlationId: id }, 200, origin);
   } catch (error) {

@@ -350,19 +350,49 @@ Deno.serve(async req => {
     const admin = supabaseAdmin();
     const { data: site } = await admin
       .from('sites')
-      .select('id, organisation_id, status, deployment_disabled')
+      .select('id, organisation_id, status, deployment_disabled, deriv_mode, requested_markup_rate, deriv_affiliate_id')
       .eq('id', siteId)
       .eq('status', 'active')
       .maybeSingle();
     if (!site || site.deployment_disabled) return json(safeError('site_unavailable', 'This site is not available', id), 404, origin);
 
-    const { data: application } = await admin
+    let { data: application } = await admin
       .from('deriv_applications')
       .select('*')
       .eq('site_id', siteId)
       .in('verification_status', ['configured', 'verified'])
       .maybeSingle();
-    if (!application) return json(safeError('deriv_app_missing', 'Deriv application configuration is incomplete', id), 409, origin);
+
+    // Auto-bind closest active superuser v2 DevHub App from pool for platform_managed sites.
+    if ((!application || application.source_type === 'platform_managed') && site.deriv_mode !== 'custom') {
+      await admin.rpc('assign_platform_deriv_app_to_site', {
+        _site_id: siteId,
+        _markup_percentage: Number(site.requested_markup_rate ?? 2.5),
+        _environment: 'production',
+        _scopes: requested,
+      });
+      const refreshed = await admin
+        .from('deriv_applications')
+        .select('*')
+        .eq('site_id', siteId)
+        .in('verification_status', ['configured', 'verified'])
+        .maybeSingle();
+      application = refreshed.data;
+    }
+
+    if (!application) {
+      return json(
+        safeError(
+          'deriv_app_missing',
+          site.deriv_mode === 'platform_managed'
+            ? 'Platform Deriv application pool is being configured by the administrator'
+            : 'Deriv application configuration is incomplete',
+          id,
+        ),
+        409,
+        origin,
+      );
+    }
 
     const allowedScopes = new Set(application.configured_scopes || []);
     if (requested.some(scope => !allowedScopes.has(scope))) {
@@ -394,8 +424,11 @@ Deno.serve(async req => {
     url.searchParams.set('state', state);
     url.searchParams.set('code_challenge', challenge);
     url.searchParams.set('code_challenge_method', 'S256');
+    if (typeof site.deriv_affiliate_id === 'string' && /^[A-Za-z0-9_-]{3,64}$/.test(site.deriv_affiliate_id.trim())) {
+      url.searchParams.set('t', site.deriv_affiliate_id.trim());
+    }
 
-    await audit({ organisationId: site.organisation_id, siteId, actorType: 'trader', action: 'trader.oauth.started', provider: 'deriv', correlationId: id, metadata: { scopes: requested } });
+    await audit({ organisationId: site.organisation_id, siteId, actorType: 'trader', action: 'trader.oauth.started', provider: 'deriv', correlationId: id, metadata: { scopes: requested, sourceType: application.source_type || 'custom', appId: application.app_id } });
     return json({ authorizationUrl: url.toString(), expiresAt, correlationId: id }, 200, origin);
   } catch (error) {
     console.error('deriv-oauth-start failed', { correlationId: id, error });
