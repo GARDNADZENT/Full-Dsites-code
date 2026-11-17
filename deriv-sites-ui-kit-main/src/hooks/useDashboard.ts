@@ -1,6 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
+import type { SiteDomainSummary } from "@/lib/domain-utils";
 
 export interface Site {
   id: string;
@@ -14,6 +15,7 @@ export interface Site {
   domain_purchases?: {
     domain_name: string;
   } | null;
+  site_domains?: SiteDomainSummary[] | null;
 }
 
 export interface Subscription {
@@ -39,7 +41,8 @@ export function useDashboard() {
         .from('sites')
         .select(`
           *,
-          domain_purchases(domain_name)
+          domain_purchases(domain_name),
+          site_domains(id, hostname, is_primary, status, is_verified, ssl_status)
         `)
         .neq('status', 'deleted')
         .order('created_at', { ascending: false });

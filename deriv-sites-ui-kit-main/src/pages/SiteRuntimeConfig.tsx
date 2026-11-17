@@ -5,8 +5,12 @@ import {
   AlertTriangle,
   ArrowLeft,
   Bot,
+  Check,
+  Copy,
   ExternalLink,
   Globe,
+  Link2,
+  Loader2,
   RefreshCw,
   RotateCcw,
   Save,
@@ -30,13 +34,26 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import {
+  buildDerivCallbackUrl,
+  buildVercelHostname,
+  type DomainVerificationRecord,
+  extractVercelSlug,
+  getRequiredDnsRecords,
+  isVercelAppHostname,
+  normalizeHostnameInput,
+  normalizeVercelSlug,
+  VERCEL_SUFFIX,
+} from "@/lib/domain-utils";
+import {
   createDraftSiteConfigSnapshot,
   getDefaultSitePages,
   getSiteDeployments,
   getSiteIntegration,
   getSiteRuntimeConfigAdmin,
   getSiteTools,
+  ProvisionDomainError,
   provisionSite,
+  provisionSiteDomain,
   publishSiteToGitHub,
   retryDeployment,
   rollbackSite,
@@ -348,11 +365,62 @@ const SiteRuntimeConfig = () => {
     onError: err => toast.error(err instanceof Error ? err.message : "Failed to save tool"),
   });
 
+  const [domainVerification, setDomainVerification] = useState<DomainVerificationRecord[]>([]);
+  const [domainSuggestions, setDomainSuggestions] = useState<string[]>([]);
+
+  const verifyDomainMutation = useMutation({
+    mutationFn: async (action: "attach" | "verify") => {
+      const normalized = normalizeHostnameInput(domainForm.hostname);
+      if (!normalized) throw new Error("Enter a domain or free .vercel.app subdomain first");
+      const saved = await upsertSiteDomain(siteId, {
+        ...domainForm,
+        hostname: normalized,
+      });
+      setDomainForm(prev => ({
+        ...prev,
+        id: saved.id,
+        hostname: saved.hostname,
+        status: saved.status as SiteDomainInput["status"],
+        is_verified: saved.is_verified,
+        ssl_status: saved.ssl_status,
+      }));
+      return provisionSiteDomain(siteId, { action, hostname: normalized });
+    },
+    onSuccess: async result => {
+      setDomainSuggestions([]);
+      setDomainVerification(result.domainVerification || []);
+      if (result.domain?.isVerified) {
+        toast.success(
+          result.domain.isVercelSubdomain
+            ? `https://${result.domain.hostname} is live on Vercel!`
+            : `${result.domain.hostname} is verified and SSL is active!`,
+        );
+      } else {
+        toast.info(
+          "Domain attached on Vercel. Configure the DNS records shown below, wait a few minutes, and click Verify DNS.",
+        );
+      }
+      await Promise.all([
+        refreshConfig(),
+        queryClient.invalidateQueries({ queryKey: ["site-integration", siteId] }),
+      ]);
+    },
+    onError: err => {
+      if (err instanceof ProvisionDomainError && err.suggestions.length) {
+        setDomainSuggestions(err.suggestions);
+      }
+      toast.error(err instanceof Error ? err.message : "Domain verification failed");
+    },
+  });
+
   const provisionMutation = useMutation({
     mutationFn: () => provisionSite(siteId),
     onSuccess: async result => {
       toast.success(`Vercel project ${result.netlify_site_name || "connected"}`);
-      await queryClient.invalidateQueries({ queryKey: ["site-integration", siteId] });
+      await Promise.all([
+        refreshConfig(),
+        queryClient.invalidateQueries({ queryKey: ["site-integration", siteId] }),
+      ]);
     },
     onError: err => toast.error(err instanceof Error ? err.message : "Provisioning failed"),
   });
@@ -722,35 +790,201 @@ const SiteRuntimeConfig = () => {
                 <Globe className="w-5 h-5 text-primary" />
                 Primary Domain
               </CardTitle>
-              <CardDescription>Basic hostname mapping used by the public runtime config endpoint.</CardDescription>
+              <CardDescription>
+                Use a free <code className="text-foreground">.vercel.app</code> subdomain (zero DNS setup) or connect a custom domain you own. You can upgrade from a free Vercel URL to a custom domain anytime.
+              </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
-              <Field label="Hostname">
+              {/* Quick mode switch */}
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={isVercelAppHostname(domainForm.hostname) || !domainForm.hostname ? "default" : "outline"}
+                  onClick={() => {
+                    setDomainSuggestions([]);
+                    const slug =
+                      extractVercelSlug(domainForm.hostname) ||
+                      normalizeVercelSlug(settingsForm.brand_name || data.site?.name || "my-site");
+                    setDomainForm(prev => ({
+                      ...prev,
+                      hostname: buildVercelHostname(slug),
+                    }));
+                  }}
+                >
+                  <Sparkles className="w-3.5 h-3.5 mr-1.5" />
+                  Free Vercel Subdomain
+                </Button>
+                <Button
+                  type="button"
+                  size="sm"
+                  variant={domainForm.hostname && !isVercelAppHostname(domainForm.hostname) ? "default" : "outline"}
+                  onClick={() => {
+                    setDomainSuggestions([]);
+                    if (isVercelAppHostname(domainForm.hostname)) {
+                      setDomainForm(prev => ({ ...prev, hostname: "" }));
+                    }
+                  }}
+                >
+                  <Link2 className="w-3.5 h-3.5 mr-1.5" />
+                  Custom Domain I Own
+                </Button>
+              </div>
+
+              <Field
+                label="Hostname"
+                description={
+                  isVercelAppHostname(domainForm.hostname)
+                    ? "Free single-level Vercel alias (e.g. my-brand.vercel.app) attached directly to the shared Vercel runtime."
+                    : "Enter a root domain (e.g. mybrand.com, mybrand.co.ke) or subdomain (e.g. trade.mybrand.com)."
+                }
+              >
                 <Input
                   value={domainForm.hostname}
-                  onChange={e => setDomainForm(prev => ({ ...prev, hostname: e.target.value }))}
-                  placeholder="riskmanagers.site"
+                  onChange={e =>
+                    setDomainForm(prev => ({
+                      ...prev,
+                      hostname: e.target.value.toLowerCase(),
+                    }))
+                  }
+                  onBlur={e =>
+                    setDomainForm(prev => ({
+                      ...prev,
+                      hostname: normalizeHostnameInput(e.target.value),
+                    }))
+                  }
+                  placeholder="my-brand.vercel.app or mybrand.com"
                 />
               </Field>
 
-              <div className="grid gap-4 md:grid-cols-2">
-                <Field label="Status">
-                  <Select value={domainForm.status} onValueChange={value => setDomainForm(prev => ({ ...prev, status: value as SiteDomainInput["status"] }))}>
-                    <SelectTrigger>
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="pending">pending</SelectItem>
-                      <SelectItem value="verified">verified</SelectItem>
-                      <SelectItem value="active">active</SelectItem>
-                    </SelectContent>
-                  </Select>
-                </Field>
+              {domainSuggestions.length > 0 ? (
+                <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 space-y-2">
+                  <p className="text-xs text-amber-300">
+                    That Vercel subdomain is taken. Try one of these alternatives:
+                  </p>
+                  <div className="flex flex-wrap gap-2">
+                    {domainSuggestions.map(item => {
+                      const candidate = `${item}${VERCEL_SUFFIX}`;
+                      return (
+                        <button
+                          key={candidate}
+                          type="button"
+                          onClick={() => {
+                            setDomainForm(prev => ({ ...prev, hostname: candidate }));
+                            setDomainSuggestions([]);
+                          }}
+                          className="rounded-md border border-amber-400/30 bg-background/60 px-2.5 py-1 text-xs text-foreground hover:border-primary"
+                        >
+                          {candidate}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ) : null}
 
-                <Field label="SSL Status">
-                  <Input value={domainForm.ssl_status || ""} onChange={e => setDomainForm(prev => ({ ...prev, ssl_status: e.target.value }))} />
-                </Field>
+              <div className="grid gap-4 md:grid-cols-2">
+                <div className="rounded-lg border border-white/10 bg-white/5 p-3">
+                  <p className="text-xs text-muted-foreground">Verification status</p>
+                  <p className="mt-1 text-sm font-medium text-foreground flex items-center gap-1.5">
+                    {domainForm.is_verified && domainForm.status === "active" ? (
+                      <>
+                        <Check className="w-4 h-4 text-emerald-400" />
+                        Active & verified
+                      </>
+                    ) : (
+                      <span className="text-amber-400 capitalize">
+                        {domainForm.status || "pending"} (verify on Vercel below)
+                      </span>
+                    )}
+                  </p>
+                </div>
+
+                <div className="rounded-lg border border-white/10 bg-white/5 p-3">
+                  <p className="text-xs text-muted-foreground">SSL certificate</p>
+                  <p className="mt-1 text-sm font-medium text-foreground capitalize">
+                    {(domainForm.ssl_status || "pending").replace(/_/g, " ")}
+                  </p>
+                </div>
               </div>
+
+              {/* DNS instructions for external custom domains */}
+              {domainForm.hostname && !isVercelAppHostname(domainForm.hostname) ? (
+                <div className="rounded-lg border border-white/10 bg-white/5 p-4 space-y-3">
+                  <div>
+                    <p className="text-sm font-medium text-foreground">
+                      Required DNS records
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Add these records in your domain registrar's DNS settings, then click Verify DNS.
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    {getRequiredDnsRecords(domainForm.hostname, domainVerification).map(record => (
+                      <div
+                        key={`${record.type}:${record.name}:${record.value}`}
+                        className="flex flex-wrap items-center justify-between gap-2 rounded-md border border-white/10 bg-background/60 px-3 py-2 text-xs"
+                      >
+                        <div className="space-y-0.5">
+                          <div className="flex flex-wrap items-center gap-2 font-mono text-foreground">
+                            <span className="rounded bg-primary/20 px-1.5 py-0.5 text-[11px] font-semibold text-primary">
+                              {record.type}
+                            </span>
+                            <span>Host: {record.name}</span>
+                            <span className="text-muted-foreground">→</span>
+                            <span className="text-emerald-400 break-all">{record.value}</span>
+                            {!record.required ? (
+                              <span className="rounded bg-white/10 px-1.5 py-0.5 font-sans text-[10px] text-muted-foreground">
+                                Optional
+                              </span>
+                            ) : null}
+                          </div>
+                          <p className="text-[11px] text-muted-foreground">{record.purpose}</p>
+                        </div>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="ghost"
+                          onClick={() => {
+                            navigator.clipboard
+                              .writeText(record.value)
+                              .then(() => toast.success(`${record.type} value copied`))
+                              .catch(() => toast.error("Unable to copy"));
+                          }}
+                        >
+                          <Copy className="w-3.5 h-3.5 mr-1" />
+                          Copy
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+
+              {domainForm.hostname ? (
+                <div className="rounded-lg border border-white/10 bg-white/5 p-3 text-xs text-muted-foreground flex flex-wrap items-center justify-between gap-2">
+                  <span>
+                    Deriv App redirect URL:{" "}
+                    <code className="text-foreground">
+                      {buildDerivCallbackUrl(domainForm.hostname)}
+                    </code>
+                  </span>
+                  <Button
+                    type="button"
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      const cb = buildDerivCallbackUrl(domainForm.hostname);
+                      setDerivAppForm(prev => ({ ...prev, redirect_uri: cb }));
+                      navigator.clipboard.writeText(cb).catch(() => {});
+                      toast.success("Callback URL copied & filled in Deriv tab");
+                    }}
+                  >
+                    <Copy className="w-3.5 h-3.5 mr-1" />
+                    Copy & sync
+                  </Button>
+                </div>
+              ) : null}
 
               <div className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 p-4">
                 <div>
@@ -760,10 +994,35 @@ const SiteRuntimeConfig = () => {
                 <Switch checked={domainForm.is_primary ?? true} onCheckedChange={checked => setDomainForm(prev => ({ ...prev, is_primary: checked }))} />
               </div>
 
-              <div className="flex justify-end">
-                <Button onClick={() => domainMutation.mutate()} disabled={domainMutation.isPending}>
+              <div className="flex flex-wrap justify-end gap-2">
+                <Button
+                  variant="outline"
+                  onClick={() => domainMutation.mutate()}
+                  disabled={domainMutation.isPending || verifyDomainMutation.isPending}
+                >
                   <Save className="w-4 h-4 mr-2" />
-                  {domainMutation.isPending ? "Saving..." : "Save Domain"}
+                  {domainMutation.isPending ? "Saving..." : "Save Hostname"}
+                </Button>
+                <Button
+                  onClick={() =>
+                    verifyDomainMutation.mutate(
+                      isVercelAppHostname(domainForm.hostname) ? "attach" : "verify",
+                    )
+                  }
+                  disabled={
+                    !domainForm.hostname.trim() ||
+                    domainMutation.isPending ||
+                    verifyDomainMutation.isPending
+                  }
+                >
+                  {verifyDomainMutation.isPending ? (
+                    <Loader2 className="w-4 h-4 mr-2 animate-spin" />
+                  ) : (
+                    <RefreshCw className="w-4 h-4 mr-2" />
+                  )}
+                  {isVercelAppHostname(domainForm.hostname)
+                    ? "Attach & Activate on Vercel"
+                    : "Attach & Verify DNS"}
                 </Button>
               </div>
             </CardContent>
@@ -1097,10 +1356,21 @@ const SiteRuntimeConfig = () => {
   );
 };
 
-const Field = ({ label, children }: { label: string; children: React.ReactNode }) => (
+const Field = ({
+  label,
+  description,
+  children,
+}: {
+  label: string;
+  description?: string;
+  children: React.ReactNode;
+}) => (
   <label className="space-y-2 block">
     <span className="text-sm font-medium text-foreground">{label}</span>
     {children}
+    {description ? (
+      <span className="block text-xs text-muted-foreground">{description}</span>
+    ) : null}
   </label>
 );
 

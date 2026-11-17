@@ -1,6 +1,37 @@
 import { serve } from "https://deno.land/std@0.224.0/http/server.ts";
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2.49.8";
-import { audit, correlationId } from "../_shared/http.ts";
+
+const correlationId = () => crypto.randomUUID();
+
+const audit = async (input: {
+  organisationId?: string | null;
+  siteId?: string | null;
+  actorUserId?: string | null;
+  actorType: "platform_owner" | "platform_admin" | "trader" | "system" | "provider";
+  action: string;
+  provider?: string;
+  correlationId: string;
+  metadata?: Record<string, unknown>;
+}) => {
+  try {
+    const url = Deno.env.get("SUPABASE_URL")?.trim();
+    const key = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")?.trim();
+    if (!url || !key) return;
+    const client = createClient(url, key, { auth: { persistSession: false } });
+    await client.from("audit_logs").insert({
+      organisation_id: input.organisationId || null,
+      site_id: input.siteId || null,
+      actor_user_id: input.actorUserId || null,
+      actor_type: input.actorType,
+      action: input.action,
+      provider: input.provider || null,
+      correlation_id: input.correlationId,
+      metadata: input.metadata || {},
+    });
+  } catch (err) {
+    console.error("audit write failed", { correlationId: input.correlationId, err });
+  }
+};
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -421,6 +452,20 @@ serve(async (req) => {
     // function's static fields.
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const draft = configuration.data?.configuration as Record<string, any> | undefined;
+    const draftVercelSubdomain =
+      draft?.deployment?.domainMode === "vercel_subdomain" &&
+      typeof draft?.deployment?.subdomain === "string" &&
+      draft.deployment.subdomain.trim()
+        ? `${draft.deployment.subdomain.trim().toLowerCase().replace(/\.vercel\.app$/i, "")}.vercel.app`
+        : "";
+    const resolvedHostname = (
+      draftVercelSubdomain ||
+      draft?.deployment?.customDomain ||
+      domain.data?.hostname ||
+      ""
+    )
+      .trim()
+      .toLowerCase();
     const traderScopes = (modernDerivApp.data?.configured_scopes || ["trade"]).filter((scope: string) => scope !== "application_read");
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     let publicConfig: Record<string, any> = {
@@ -435,7 +480,7 @@ serve(async (req) => {
       site: {
         id: site.id,
         name: draft?.project?.siteName || settings.data?.site_name || site.name,
-        hostname: draft?.deployment?.customDomain || domain.data?.hostname || "",
+        hostname: resolvedHostname,
       },
       branding: {
         brandName: draft?.project?.siteName || settings.data?.brand_name || settings.data?.site_name || site.name,
@@ -671,7 +716,10 @@ serve(async (req) => {
         }).eq("id", siteId),
       ] : []),
       ...(isInstantSharedDeploy ? [
-        admin.from("site_domains").update({ status: "active", is_verified: true }).eq("site_id", siteId).eq("is_primary", true),
+        // Only activate hostnames that have passed Vercel ownership/DNS verification
+        // (free .vercel.app subdomains are verified automatically on attach; custom
+        // domains activate once Verify DNS confirms the A/CNAME/TXT record).
+        admin.from("site_domains").update({ status: "active" }).eq("site_id", siteId).eq("is_primary", true).eq("is_verified", true),
       ] : []),
       admin.from("deployment_logs").insert({
         organisation_id: site.organisation_id,

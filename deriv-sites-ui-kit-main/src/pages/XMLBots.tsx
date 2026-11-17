@@ -10,6 +10,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useDashboard } from "@/hooks/useDashboard";
+import { getSitePrimaryHostname } from "@/lib/domain-utils";
 import { supabase } from "@/integrations/supabase/client";
 import { useAuth } from "@/contexts/AuthContext";
 import { toast } from "sonner";
@@ -72,7 +73,7 @@ const XMLBots = () => {
 
   const getSiteName = (siteId: string) => {
     const site = sites.find(s => s.id === siteId);
-    return site?.name || site?.domain_purchases?.domain_name || 'Unknown Site';
+    return site?.name || getSitePrimaryHostname(site) || 'Unknown Site';
   };
 
   const markSiteAsPending = async (siteId: string, reason: 'new_site' | 'bot_added' | 'bot_deleted', deletedBotName?: string) => {
@@ -240,7 +241,7 @@ const XMLBots = () => {
                 <SelectItem value="all">All Sites</SelectItem>
                 {configuredSites.map(site => (
                   <SelectItem key={site.id} value={site.id}>
-                    {site.domain_purchases?.domain_name || site.name}
+                    {getSitePrimaryHostname(site) || site.name}
                   </SelectItem>
                 ))}
               </SelectContent>
