@@ -360,6 +360,7 @@ export async function upsertPoolApp(input: {
   notes?: string;
   syncToDeriv?: boolean;
 }): Promise<{ app: PlatformPoolApp; syncedToDeriv: boolean; rebalancedSites: number }> {
+  // Display names stay intact locally; the Edge Function sanitizes the name it sends to Deriv.
   return invokeManagePlatformDeriv({ action: "upsert_pool_app", ...input });
 }
 
