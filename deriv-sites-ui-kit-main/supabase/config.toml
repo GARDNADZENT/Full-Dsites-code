@@ -33,6 +33,12 @@ verify_jwt = false
 [functions.publish-site-to-github]
 verify_jwt = true
 
+[functions.provision-site-vercel]
+verify_jwt = true
+
+[functions.vercel-deploy-webhook]
+verify_jwt = false
+
 [functions.provision-site-netlify]
 verify_jwt = true
 

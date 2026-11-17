@@ -20,8 +20,36 @@ const normalizeOrigin = (value: string | null): string | null => {
   }
 };
 
+const extractRequestOrigin = (req: Request): string | null => {
+  const explicitOrigin = normalizeOrigin(req.headers.get('origin'));
+  if (explicitOrigin) return explicitOrigin;
+
+  // Browsers omit the Origin header on same-origin GET/HEAD requests proxied
+  // through Vercel/Netlify `/api/*` rewrites. Derive it safely from Referer or
+  // X-Forwarded-Host only when Sec-Fetch-Site isn't cross-site, then enforce
+  // the exact same database allowlist below.
+  const method = req.method.toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') return null;
+
+  const fetchSite = req.headers.get('sec-fetch-site')?.toLowerCase();
+  if (fetchSite && fetchSite !== 'same-origin' && fetchSite !== 'none') return null;
+
+  const refererOrigin = normalizeOrigin(req.headers.get('referer'));
+  if (refererOrigin) return refererOrigin;
+
+  const forwardedHost = req.headers.get('x-forwarded-host')?.split(',')[0]?.trim().toLowerCase();
+  if (!forwardedHost || !/^[a-z0-9.-]+(?::\d+)?$/.test(forwardedHost)) return null;
+
+  const rawProto = req.headers.get('x-forwarded-proto')?.split(',')[0]?.trim().toLowerCase();
+  const isLocalHost = /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(forwardedHost);
+  const proto = rawProto === 'http' && isLocalHost && Deno.env.get('ENVIRONMENT') !== 'production' ? 'http' : 'https';
+  if (rawProto && rawProto !== 'https' && proto !== 'http') return null;
+
+  return normalizeOrigin(`${proto}://${forwardedHost}`);
+};
+
 export async function resolveAllowedOrigin(req: Request, requestedSiteId?: string | null): Promise<string | null> {
-  const origin = normalizeOrigin(req.headers.get('origin'));
+  const origin = extractRequestOrigin(req);
   if (!origin) return null;
 
   const parsed = new URL(origin);
@@ -57,7 +85,7 @@ export async function resolveAllowedOrigin(req: Request, requestedSiteId?: strin
 export const corsHeaders = (origin: string | null) => ({
   ...(origin ? { 'Access-Control-Allow-Origin': origin } : {}),
   'Access-Control-Allow-Credentials': 'true',
-  'Access-Control-Allow-Headers': 'content-type, x-reef-site-id, x-csrf-token, x-client-info, apikey',
+  'Access-Control-Allow-Headers': 'authorization, content-type, x-reef-site-id, x-csrf-token, x-client-info, apikey',
   'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
   'Access-Control-Max-Age': '600',
   Vary: 'Origin',

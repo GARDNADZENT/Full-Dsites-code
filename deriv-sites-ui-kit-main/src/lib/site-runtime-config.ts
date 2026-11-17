@@ -492,10 +492,23 @@ export async function getSiteIntegration(siteId: string): Promise<SiteIntegratio
 }
 
 export async function provisionSite(siteId: string): Promise<SiteIntegrationRow> {
-  const { data, error } = await supabase.functions.invoke<{ integration: SiteIntegrationRow }>("provision-site-netlify", {
+  const { data, error } = await supabase.functions.invoke<{
+    integration: SiteIntegrationRow;
+    mode?: "shared" | "dedicated";
+    domainVerification?: Array<{ type?: string; domain?: string; value?: string }>;
+    error?: string;
+  }>("provision-site-vercel", {
     body: { siteId },
   });
-  if (error) throw new Error(error.message);
+  if (error) {
+    let message = error.message;
+    const context = "context" in error ? error.context : null;
+    if (context instanceof Response) {
+      const body = await context.json().catch(() => null);
+      if (body?.error) message = body.error;
+    }
+    throw new Error(message);
+  }
   if (!data?.integration) throw new Error("Provisioning returned no integration");
   return data.integration;
 }
@@ -521,7 +534,7 @@ export async function rollbackSite(siteId: string, publishVersionId: string): Pr
 export type GitHubPublishResult = {
   deploymentId: string;
   version: number;
-  status: "committed";
+  status: "committed" | "deployed";
   commitSha: string;
   commitUrl: string;
 };

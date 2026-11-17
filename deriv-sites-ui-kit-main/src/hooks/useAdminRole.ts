@@ -26,6 +26,13 @@ export const useAdminRole = (): PlatformAccess => {
         if (active) { setAccess({ role: null, isAdmin: false, canManageSites: false, canSupport: false, canViewFinance: false }); setLoading(false); }
         return;
       }
+      if (import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEV_AUTH === "true" && user.app_metadata?.provider === "development") {
+        if (active) {
+          setAccess({ role: "super_admin", isAdmin: true, canManageSites: true, canSupport: true, canViewFinance: true });
+          setLoading(false);
+        }
+        return;
+      }
       setLoading(true);
       try {
         // Generated database types are refreshed only after the migration is applied.

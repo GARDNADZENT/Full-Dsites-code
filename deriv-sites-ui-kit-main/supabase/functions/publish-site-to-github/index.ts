@@ -636,6 +636,13 @@ serve(async (req) => {
       ],
     );
 
+    const sharedProjectId = Deno.env.get("VERCEL_SHARED_PROJECT_ID")?.trim() || "";
+    const isInstantSharedDeploy =
+      Boolean(sharedProjectId) &&
+      integration.data?.status === "connected" &&
+      importedBotFiles.length === 0;
+    const postCommitStatus = isInstantSharedDeploy ? "deployed" : "committed";
+
     await Promise.all([
       admin
         .from("site_publish_versions")
@@ -644,18 +651,40 @@ serve(async (req) => {
       admin
         .from("site_deployments")
         .update({
-          status: "committed",
+          status: postCommitStatus,
           repository_branch: branch,
           commit_sha: commit.sha,
           commit_url: commit.htmlUrl,
+          ...(isInstantSharedDeploy && integration.data?.netlify_site_url
+            ? { netlify_deploy_url: integration.data.netlify_site_url }
+            : {}),
           completed_at: new Date().toISOString(),
         })
         .eq("id", deployment.id),
       ...(configuration.data ? [
         admin.from("site_configurations").update({ status: "published", published_by: authData.user.id, published_at: generatedAt }).eq("id", configuration.data.id),
-        admin.from("sites").update({ configuration_status: "published", active_configuration_version: configuration.data.version, active_template_version: configuration.data.template_version }).eq("id", siteId),
+        admin.from("sites").update({
+          configuration_status: "published",
+          active_configuration_version: configuration.data.version,
+          active_template_version: configuration.data.template_version,
+          ...(isInstantSharedDeploy ? { status: "active" } : {}),
+        }).eq("id", siteId),
       ] : []),
-      admin.from("deployment_logs").insert({ organisation_id: site.organisation_id, site_id: siteId, deployment_id: deployment.id, level: "info", stage: "github_committed", message: "Configuration committed; waiting for Netlify", provider: "github", metadata: { commitSha: commit.sha, branch } }),
+      ...(isInstantSharedDeploy ? [
+        admin.from("site_domains").update({ status: "active", is_verified: true }).eq("site_id", siteId).eq("is_primary", true),
+      ] : []),
+      admin.from("deployment_logs").insert({
+        organisation_id: site.organisation_id,
+        site_id: siteId,
+        deployment_id: deployment.id,
+        level: "info",
+        stage: "github_committed",
+        message: isInstantSharedDeploy
+          ? "Configuration committed and live on shared Vercel runtime"
+          : "Configuration committed; waiting for Vercel deployment",
+        provider: isInstantSharedDeploy ? "vercel" : "github",
+        metadata: { commitSha: commit.sha, branch, mode: sharedProjectId ? "shared" : "dedicated" },
+      }),
     ]);
 
     await audit({ organisationId: site.organisation_id, siteId, actorUserId: authData.user.id, actorType: auditActorType, action: "configuration.published", provider: "github", correlationId: requestId, metadata: { deploymentId: deployment.id, version, commitSha: commit.sha } });
@@ -663,7 +692,7 @@ serve(async (req) => {
     return jsonResponse({
       deploymentId: deployment.id,
       version,
-      status: "committed",
+      status: postCommitStatus,
       commitSha: commit.sha,
       commitUrl: commit.htmlUrl,
     });

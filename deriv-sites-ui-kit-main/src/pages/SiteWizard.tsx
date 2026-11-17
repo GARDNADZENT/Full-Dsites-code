@@ -61,7 +61,7 @@ type WizardDraft = {
   deployment: {
     subdomain: string;
     customDomain: string;
-    provider: "netlify";
+    provider: "vercel" | "netlify";
     branch: string;
     buildCommand: string;
     outputDirectory: string;
@@ -115,7 +115,7 @@ const steps = [
 const initialDraft = (): WizardDraft => ({
   commercial: { plan: "partnership_monthly", paymentPhone: "", paymentEmail: "", acceptedTerms: false },
   project: { siteName: "", internalName: "", description: "", organisationName: "", supportEmail: "", supportContact: "", language: "en", region: "" },
-  deployment: { subdomain: "", customDomain: "", provider: "netlify", branch: "main", buildCommand: "npm run build", outputDirectory: "dist" },
+  deployment: { subdomain: "", customDomain: "", provider: "vercel", branch: "main", buildCommand: "npm run build", outputDirectory: "dist" },
   branding: {
     primaryColor: "#0ea5e9",
     secondaryColor: "#111827",
@@ -157,7 +157,7 @@ const normalizeDraft = (value: Partial<WizardDraft>): WizardDraft => {
     ...value,
     commercial: { ...fallback.commercial, ...value.commercial },
     project: { ...fallback.project, ...value.project },
-    deployment: { ...fallback.deployment, ...value.deployment },
+    deployment: { ...fallback.deployment, ...value.deployment, provider: "vercel" },
     branding: { ...fallback.branding, ...value.branding },
     template: { ...fallback.template, ...value.template },
     deriv: { ...fallback.deriv, ...value.deriv },
@@ -439,7 +439,7 @@ const SiteWizard = () => {
       await saveDraft(10);
       await invokePublish();
       localStorage.removeItem(publishQueueKey);
-      toast.success("Configuration committed. Netlify is building the site.");
+      toast.success("Configuration committed. Vercel deployment is updating.");
       navigate(`/sites/${siteId}/config`);
     } catch (error) {
       if (!navigator.onLine || (error instanceof Error && /fetch|network|offline/i.test(`${error.name} ${error.message}`))) {
@@ -517,7 +517,7 @@ const SiteWizard = () => {
             </Button>
             <div>
               <h1 className="text-2xl font-semibold tracking-normal text-slate-950">Customer site wizard</h1>
-              <p className="mt-1 text-sm text-slate-500">Version {configurationVersion}. Build the site first, collect payment at the end, then publish to GitHub and Netlify.</p>
+              <p className="mt-1 text-sm text-slate-500">Version {configurationVersion}. Build the site first, collect payment at the end, then publish to GitHub and Vercel.</p>
             </div>
           </div>
           <div className="rounded-md border border-slate-200 bg-white px-4 py-3 text-sm shadow-sm">
@@ -764,7 +764,7 @@ const SiteWizard = () => {
                   <Field label="Production branch">{input(draft.deployment.branch, value => updateDeployment("branch", value))}</Field>
                   <Field label="Output directory">{input(draft.deployment.outputDirectory, value => updateDeployment("outputDirectory", value))}</Field>
                   <Field label="Exact registered callback URL" help={`Register https://${draft.deployment.customDomain || "your-domain"}/api/deriv-oauth-callback in Deriv.`}>{input(draft.deriv.callbackUri, value => updateDeriv("callbackUri", value))}</Field>
-                  <Field label="Provider">{input("Netlify", () => {})}</Field>
+                  <Field label="Provider">{input("Vercel", () => {})}</Field>
                 </div>
               </section>
             ) : null}
@@ -815,7 +815,7 @@ const SiteWizard = () => {
               <section className="space-y-5">
                 <div>
                   <h2 className="text-xl font-semibold">Payment and publish</h2>
-                  <p className="mt-1 text-sm text-slate-500">Collect the selected payment details now. After this, publishing creates the GitHub commit and Netlify deploy.</p>
+                  <p className="mt-1 text-sm text-slate-500">Collect the selected payment details now. After this, publishing creates the GitHub commit and Vercel deploy.</p>
                 </div>
                 <div className="rounded-lg border border-sky-200 bg-sky-50 p-5">
                   <div className="flex flex-wrap items-center justify-between gap-3">

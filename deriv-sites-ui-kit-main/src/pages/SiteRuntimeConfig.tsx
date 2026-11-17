@@ -351,7 +351,7 @@ const SiteRuntimeConfig = () => {
   const provisionMutation = useMutation({
     mutationFn: () => provisionSite(siteId),
     onSuccess: async result => {
-      toast.success(`Netlify project ${result.netlify_site_name || "created"}`);
+      toast.success(`Vercel project ${result.netlify_site_name || "connected"}`);
       await queryClient.invalidateQueries({ queryKey: ["site-integration", siteId] });
     },
     onError: err => toast.error(err instanceof Error ? err.message : "Provisioning failed"),
@@ -969,7 +969,7 @@ const SiteRuntimeConfig = () => {
                 Update Website
               </CardTitle>
               <CardDescription>
-                Create a versioned configuration and commit it to the shared GitHub repository. The connected Netlify site will detect the commit automatically.
+                Create a versioned configuration and commit it to the shared GitHub repository. The connected Vercel project serves updated tenant configurations automatically.
               </CardDescription>
             </CardHeader>
             <CardContent className="space-y-4">
@@ -999,7 +999,7 @@ const SiteRuntimeConfig = () => {
               <div className="rounded-lg border border-white/10 bg-white/5 p-4 space-y-3">
                 <div className="flex items-center justify-between gap-3">
                   <div>
-                    <p className="text-sm font-medium text-foreground">GitHub and Netlify</p>
+                    <p className="text-sm font-medium text-foreground">GitHub and Vercel</p>
                     <p className="text-xs text-muted-foreground">
                       {integration?.status === "connected"
                         ? `Connected to ${integration.netlify_site_name}`
@@ -1053,7 +1053,7 @@ const SiteRuntimeConfig = () => {
                       ) : null}
                       {deployment.netlify_log_url ? (
                         <a href={deployment.netlify_log_url} target="_blank" rel="noreferrer" className="ml-3 text-xs text-primary hover:underline">
-                          Netlify deploy log
+                          Vercel deploy log
                         </a>
                       ) : null}
                       {deployment.netlify_deploy_url ? (
