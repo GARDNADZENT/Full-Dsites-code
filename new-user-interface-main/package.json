@@ -6,7 +6,7 @@
         "node": "20.x"
     },
     "scripts": {
-        "start": "node node_modules/@rsbuild/core/bin/rsbuild.js dev",
+        "start": "rsbuild dev",
         "build": "rsbuild build",
         "watch": "rsbuild build --watch",
         "serve": "http-server dist -p 8443 -a localhost -o",
@@ -17,7 +17,7 @@
         "test": "jest",
         "coverage": "jest --coverage --coverageReporters=json-summary",
         "coverage:total": "npm run coverage && node -p \"require('./coverage/coverage-summary.json').total.lines.pct\"",
-        "prepare": "husky install",
+        "prepare": "husky install || true",
         "build:analyze": "BUNDLE_ANALYZE=true rsbuild build",
         "generate:brand-css": "node scripts/generate-brand-css.js",
         "dev:commit-push": "powershell -ExecutionPolicy Bypass -File scripts/dev-commit-push.ps1",

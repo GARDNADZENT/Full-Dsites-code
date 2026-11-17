@@ -22,7 +22,7 @@ const workflow = [
   { icon: CreditCard, title: "Choose plan", text: "Pick 17% monthly partnership or KES 25,000 one-time." },
   { icon: Palette, title: "Design the site", text: "Set colors, branding and preview the public trader experience." },
   { icon: Bot, title: "Import free bots", text: "Upload XML bots that appear on the Free Bots page." },
-  { icon: Globe, title: "Configure domain", text: "Set the domain, callback URL and deploy through Netlify." },
+  { icon: Globe, title: "Configure domain", text: "Set the domain, callback URL and deploy through Vercel." },
 ];
 
 const LandingHero = ({ onGetStarted }: LandingHeroProps) => {
@@ -83,7 +83,7 @@ const LandingHero = ({ onGetStarted }: LandingHeroProps) => {
             <div>
               <h2 className="font-semibold text-emerald-950">What changed</h2>
               <div className="mt-3 grid gap-2 text-sm text-emerald-800 sm:grid-cols-2">
-                {["Two payment choices only", "Setup happens before payment", "Payment moved to final step", "GitHub and Netlify publish remains after payment"].map(item => (
+                {["Two payment choices only", "Setup happens before payment", "Payment moved to final step", "GitHub and Vercel publish remains after payment"].map(item => (
                   <div key={item} className="flex items-center gap-2"><Check className="h-4 w-4" />{item}</div>
                 ))}
               </div>

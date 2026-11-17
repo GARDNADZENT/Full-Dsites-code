@@ -69,8 +69,10 @@ const fetchJson = async (url: string) => {
 
 export const initializeRuntimeSiteConfig = async (): Promise<RuntimeSiteConfig | null> => {
     const staticConfigUrl = process.env.REEF_SITE_CONFIG_URL || '/site.config.json';
-    const apiBase = process.env.SITE_CONFIG_API_BASE_URL?.replace(/\/$/, '');
+    const configuredApiBase = process.env.SITE_CONFIG_API_BASE_URL?.replace(/\/$/, '');
     const hostname = window.location.hostname.replace(/\.$/, '').toLowerCase();
+    const isLocalHost = hostname === 'localhost' || hostname === '127.0.0.1' || hostname.endsWith('.e2b.app');
+    const apiBase = configuredApiBase || (!isLocalHost ? '/api' : '');
 
     try {
         runtimeConfig = await fetchJson(staticConfigUrl);

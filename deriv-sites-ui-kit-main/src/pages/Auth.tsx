@@ -141,7 +141,7 @@ export default function Auth() {
               <p className="mb-3 text-xs font-medium uppercase text-sky-700">Secure workspace</p>
               <h2 className="text-5xl font-semibold tracking-normal">Manage hundreds of trader sites from one calm dashboard.</h2>
               <p className="mt-5 text-base leading-7 text-slate-600">
-                Sign in to configure branding, free bots, Deriv tools, GitHub publishing and Netlify deployments for each customer website.
+                Sign in to configure branding, free bots, Deriv tools, GitHub publishing and Vercel deployments for each customer website.
               </p>
             </div>
           </div>

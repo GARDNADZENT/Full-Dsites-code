@@ -3,7 +3,7 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
-const { initializeDatabase } = require('./db');
+const { initializeDatabase, ensureDatabaseInitialized } = require('./db');
 
 const app = express();
 const PORT = process.env.PORT || 8000;
@@ -37,7 +37,17 @@ app.get('/health', (req, res) => {
     res.json({ status: 'OK', message: 'API server is running' });
 });
 
-// Routes
+// Routes (ensure tables exist on cold start in serverless environments)
+if (process.env.VERCEL) {
+    app.use('/api', async (_req, _res, next) => {
+        try {
+            await ensureDatabaseInitialized();
+            next();
+        } catch (error) {
+            next(error);
+        }
+    });
+}
 app.use('/api/bot-ideas', require('./routes/bot-ideas'));
 app.use('/api/best-bot-stats', require('./routes/best-bot-stats'));
 app.use('/api/scanner', require('./routes/scanner'));
@@ -69,6 +79,8 @@ async function start() {
     }
 }
 
-start();
+if (require.main === module && !process.env.VERCEL) {
+    start();
+}
 
 module.exports = app;

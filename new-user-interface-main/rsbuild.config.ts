@@ -2,7 +2,13 @@ import { defineConfig } from '@rsbuild/core';
 import { pluginReact } from '@rsbuild/plugin-react';
 import { pluginSass } from '@rsbuild/plugin-sass';
 
+const fs = require('fs');
 const path = require('path');
+
+const siteId = process.env.REEF_SITE_ID || '';
+const siteDir = siteId ? path.resolve(__dirname, `../sites/${siteId}`) : '';
+const siteConfigFile = siteDir ? path.join(siteDir, 'site.config.json') : '';
+const siteFreeBotsDir = siteDir ? path.join(siteDir, 'free-bots') : '';
 
 export default defineConfig({
     plugins: [
@@ -28,6 +34,7 @@ export default defineConfig({
                 REEF_SITE_ID: JSON.stringify(process.env.REEF_SITE_ID || ''),
                 REEF_SITE_CONFIG_URL: JSON.stringify(process.env.REEF_SITE_CONFIG_URL || '/site.config.json'),
                 SITE_CONFIG_API_BASE_URL: JSON.stringify(process.env.SITE_CONFIG_API_BASE_URL || ''),
+                BACKEND_API_URL: JSON.stringify(process.env.BACKEND_API_URL || ''),
                 GD_CLIENT_ID: JSON.stringify(process.env.GD_CLIENT_ID),
                 GD_APP_ID: JSON.stringify(process.env.GD_APP_ID),
                 GD_API_KEY: JSON.stringify(process.env.GD_API_KEY),
@@ -48,11 +55,19 @@ export default defineConfig({
     },
     output: {
         copy: [
-            ...(process.env.REEF_SITE_ID
+            ...(siteConfigFile && fs.existsSync(siteConfigFile)
                 ? [
                       {
-                          from: path.resolve(__dirname, `../sites/${process.env.REEF_SITE_ID}/site.config.json`),
+                          from: siteConfigFile,
                           to: 'site.config.json',
+                      },
+                  ]
+                : []),
+            ...(siteFreeBotsDir && fs.existsSync(siteFreeBotsDir)
+                ? [
+                      {
+                          from: path.join(siteFreeBotsDir, '*'),
+                          to: 'free-bots/[name][ext]',
                       },
                   ]
                 : []),
@@ -93,7 +108,7 @@ export default defineConfig({
         hmr: true,
         lazyCompilation: false,
         client: {
-            host: process.env.REPLIT_DEV_DOMAIN || 'localhost',
+            host: process.env.REPLIT_DEV_DOMAIN || '',
             port: 443,
             protocol: 'wss',
         },

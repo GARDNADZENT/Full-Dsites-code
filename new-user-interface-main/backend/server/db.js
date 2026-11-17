@@ -9,8 +9,12 @@ const pool = new Pool({
 
 pool.on('error', err => {
     console.error('[DB] Unexpected error on idle client', err);
-    process.exit(-1);
+    if (!process.env.VERCEL) {
+        process.exit(-1);
+    }
 });
+
+let initPromise = null;
 
 // Initialize database tables
 async function initializeDatabase() {
@@ -82,4 +86,14 @@ async function initializeDatabase() {
     }
 }
 
-module.exports = { pool, initializeDatabase };
+function ensureDatabaseInitialized() {
+    if (!initPromise) {
+        initPromise = initializeDatabase().catch(err => {
+            initPromise = null;
+            throw err;
+        });
+    }
+    return initPromise;
+}
+
+module.exports = { pool, initializeDatabase, ensureDatabaseInitialized };
