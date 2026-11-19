@@ -416,11 +416,39 @@ Deno.serve(async req => {
   if (!consumed?.length) return redirectWithError(transaction.origin, transaction.return_path, 'callback_replayed', id);
 
   const oauthError = url.searchParams.get('error');
+  const oauthErrorDescription = url.searchParams.get('error_description');
   const code = url.searchParams.get('code');
   const callbackActor = transaction.actor_type === 'platform_owner' ? 'platform_owner' : 'trader';
+
+  // Deriv returns its own error code and description here, and reporting them as
+  // "login_cancelled" hid the real cause: a rejected request came back as
+  // request_forbidden and looked exactly like the trader closing the window.
+  // Only the documented cancellation code means the user actually cancelled.
+  const CANCELLED_CODES = new Set(['access_denied', 'user_cancelled', 'login_cancelled']);
+  const clientErrorCode = oauthError
+    ? CANCELLED_CODES.has(oauthError)
+      ? 'login_cancelled'
+      : oauthError
+    : null;
+
   if (oauthError || !code) {
-    await audit({ organisationId: transaction.organisation_id, siteId: transaction.site_id, actorUserId: transaction.owner_user_id, actorType: callbackActor, action: `${transaction.actor_type}.oauth.denied`, provider: 'deriv', correlationId: id, metadata: { code: oauthError || 'code_missing' } });
-    return redirectWithError(transaction.origin, transaction.return_path, oauthError ? 'login_cancelled' : 'code_missing', id);
+    await admin
+      .from('deriv_oauth_transactions')
+      .update({
+        deriv_error_code: oauthError ?? 'code_missing',
+        deriv_error_message:
+          typeof oauthErrorDescription === 'string' ? oauthErrorDescription.slice(0, 500) : null,
+        resolved_at: new Date().toISOString(),
+      })
+      .eq('id', transaction.id);
+
+    await audit({ organisationId: transaction.organisation_id, siteId: transaction.site_id, actorUserId: transaction.owner_user_id, actorType: callbackActor, action: `${transaction.actor_type}.oauth.denied`, provider: 'deriv', correlationId: id, metadata: { code: oauthError || 'code_missing', description: oauthErrorDescription, redirectUri: transaction.redirect_uri } });
+    return redirectWithError(
+      transaction.origin,
+      transaction.return_path,
+      clientErrorCode ?? 'code_missing',
+      id,
+    );
   }
 
   try {

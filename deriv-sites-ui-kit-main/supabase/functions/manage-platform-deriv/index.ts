@@ -231,12 +231,32 @@ const auditLog = async (
 // callback records the outcome of that validation on the transaction
 // (deriv_oauth_transactions.deriv_error_code), which this reads.
 // ---------------------------------------------------------------------------
-const exchangeSucceeded = (code: string | null): boolean => {
-  // Deriv's token endpoint answers invalid_grant for an unknown/expired code --
-  // a code it reached past redirect-URI validation to look up. invalid_request
-  // is the redirect-URI rejection.
-  if (!code) return false;
-  return code !== 'invalid_request';
+type AttemptVerdict = "accepted" | "denied" | "cancelled";
+
+/**
+ * Classify what the last login attempt proved about the redirect URI.
+ *
+ * The distinction that matters: a URI Deriv refuses produces a *Denied* error
+ * (request_forbidden, invalid_request), while a URI it accepts gets as far as
+ * the token exchange, whose failures are invalid_grant -- meaning Deriv looked
+ * the code up, so it never objected to the redirect URI. A user cancellation
+ * proves nothing either way and must not be reported as a rejection.
+ *
+ * This exists because an unverified app returns request_forbidden, which is
+ * otherwise indistinguishable from a configuration mistake.
+ */
+const classifyAttempt = (
+  errorCode: string | null | undefined,
+): AttemptVerdict => {
+  if (!errorCode) return "accepted";
+  if (["access_denied", "user_cancelled", "login_cancelled"].includes(errorCode)) {
+    return "cancelled";
+  }
+  if (errorCode === "invalid_grant" || errorCode === "invalid_client") {
+    // Reached the token endpoint, so the redirect URI was never the objection.
+    return "accepted";
+  }
+  return "denied";
 };
 
 Deno.serve(async (req) => {
@@ -1149,27 +1169,33 @@ Deno.serve(async (req) => {
 
       const { data: attempt } = await admin
         .from("deriv_oauth_transactions")
-        .select("id, redirect_uri, deriv_error_code, resolved_at, created_at, consumed_at")
+        .select("id, redirect_uri, deriv_error_code, deriv_error_message, resolved_at, created_at, consumed_at")
         .eq("site_id", siteId)
         .order("created_at", { ascending: false })
         .limit(1)
         .maybeSingle();
 
-      const registered = attempt ? exchangeSucceeded(attempt.deriv_error_code) : null;
+      const verdict = attempt ? classifyAttempt(attempt.deriv_error_code) : null;
       const mismatch =
         attempt && attempt.redirect_uri && attempt.redirect_uri !== application.callback_uri;
+      const derivSaid = attempt?.deriv_error_message || attempt?.deriv_error_code || null;
 
       let status = "unverified";
       let message =
         "No completed login yet. Run a test login from the tenant site, then check again.";
-      if (registered === true) {
+      if (verdict === "accepted") {
         status = "registered";
         message =
           "Deriv accepted this redirect URI on the last login, so it is registered on the OAuth client.";
-      } else if (registered === false) {
+      } else if (verdict === "denied") {
         status = "not_registered";
+        message = derivSaid
+          ? `Deriv refused this login before issuing a code: ${derivSaid}`
+          : "Deriv refused this login before issuing a code, which means it did not accept this redirect URI for the app below.";
+      } else if (verdict === "cancelled") {
+        status = "unverified";
         message =
-          "Deriv rejected this redirect URI on the last login. Register the exact URL in DevHub for the app below, or change the value here to match what DevHub already has.";
+          "The last login was cancelled at Deriv, so it proved nothing about the redirect URI. Try again and complete the sign-in.";
       }
 
       return json({
@@ -1182,6 +1208,7 @@ Deno.serve(async (req) => {
           ? {
               redirectUri: attempt.redirect_uri,
               derivErrorCode: attempt.deriv_error_code,
+              derivErrorMessage: attempt.deriv_error_message,
               at: attempt.created_at,
               stale: Boolean(mismatch),
             }

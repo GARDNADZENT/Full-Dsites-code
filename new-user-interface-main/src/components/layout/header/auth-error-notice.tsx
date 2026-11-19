@@ -25,6 +25,21 @@ const FAILURES: Record<string, Failure> = {
             'Deriv rejected the login because the site’s callback address is not verified on its Deriv application. The site operator needs to finish registering it; trying again will not help until then.',
         actionable: false,
     },
+    // Deriv's own code, propagated verbatim by the callback. It is returned when
+    // Deriv refuses the authorization request outright -- which on the current
+    // portal is what an unverified app looks like, not a cancelled login.
+    request_forbidden: {
+        title: 'Deriv refused this login',
+        detail:
+            'Deriv rejected the sign-in request before issuing a credential, which usually means the site’s Deriv application has not been approved yet. The site operator needs to finish that; trying again will not help until then.',
+        actionable: false,
+    },
+    invalid_request: {
+        title: 'Deriv rejected this site’s login request',
+        detail:
+            'Deriv could not accept the request as sent, typically because the site’s callback address is not accepted by its Deriv application. The site operator needs to correct it.',
+        actionable: false,
+    },
     token_exchange_failed: {
         title: 'Deriv could not complete the sign-in',
         detail:
@@ -40,6 +55,11 @@ const FAILURES: Record<string, Failure> = {
     login_cancelled: {
         title: 'Sign-in was cancelled',
         detail: 'You closed or cancelled the Deriv sign-in. You can try again whenever you are ready.',
+        actionable: true,
+    },
+    access_denied: {
+        title: 'Sign-in was declined',
+        detail: 'The Deriv sign-in was declined, so this site was not given access. You can try again.',
         actionable: true,
     },
     code_missing: {
