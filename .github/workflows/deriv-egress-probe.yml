@@ -3,7 +3,9 @@ name: deriv-egress-probe
 # Diagnostic, not product code. Answers one question:
 #   can any host outside Supabase Edge reach Deriv's WebSocket API?
 # app_register is WebSocket-only, so if WS is reachable the manual DevHub step
-# can be automated. Delete this workflow once the question is settled.
+# can be automated. Results are posted as an issue because the runner's log
+# download is not reachable from every environment. Delete this workflow once
+# the question is settled.
 
 on:
   push:
@@ -13,6 +15,10 @@ on:
       - 'scripts/deriv-egress-probe.mjs'
       - '.github/workflows/deriv-egress-probe.yml'
   workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
 
 jobs:
   probe:
@@ -26,26 +32,51 @@ jobs:
           node-version: '22'
 
       - name: Can the runner reach Deriv's WebSocket API?
-        run: node scripts/deriv-egress-probe.mjs
+        run: node scripts/deriv-egress-probe.mjs | tee probe.txt
 
       - name: DNS and TCP context
         if: always()
         run: |
-          for h in ws.derivws.com ws.binaryws.com frontend.deriv.com api.derivws.com; do
-            echo "=== $h ==="
-            getent hosts "$h" || echo "no A record"
-            timeout 8 bash -c "cat < /dev/null > /dev/tcp/$h/443" && echo "tcp443 open" || echo "tcp443 failed"
-          done
+          {
+            echo ""
+            echo "### DNS + raw TCP"
+            for h in ws.derivws.com ws.binaryws.com frontend.deriv.com api.derivws.com; do
+              echo "=== $h ==="
+              getent hosts "$h" || echo "no A record"
+              timeout 8 bash -c "cat < /dev/null > /dev/tcp/$h/443" && echo "tcp443 open" || echo "tcp443 failed"
+            done
+          } | tee -a probe.txt
 
       - name: Is the Vercel probe endpoint publicly reachable?
         if: always()
         run: |
-          for url in \
-            "https://dsites-backend-kifjym82a-gardnadzents-projects.vercel.app/api/deriv-egress-probe?host=ws.derivws.com" \
-            "https://dsites-backend.vercel.app/api/deriv-egress-probe?host=ws.derivws.com"
-          do
-            echo "=== $url ==="
-            curl -sS -o /tmp/body.txt -w "HTTP=%{http_code}\n" "$url" || echo "curl failed"
-            head -c 600 /tmp/body.txt || true
-            echo
-          done
+          {
+            echo ""
+            echo "### Vercel probe endpoint"
+            for url in \
+              "https://dsites-backend-kifjym82a-gardnadzents-projects.vercel.app/api/deriv-egress-probe?host=ws.derivws.com" \
+              "https://dsites-backend.vercel.app/api/deriv-egress-probe?host=ws.derivws.com"
+            do
+              echo "=== $url ==="
+              curl -sS -o /tmp/body.txt -w "HTTP=%{http_code}\n" "$url" || echo "curl failed"
+              head -c 800 /tmp/body.txt || true
+              echo
+            done
+          } | tee -a probe.txt
+
+      - name: Publish result as an issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          {
+            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+            echo ""
+            echo '```'
+            cat probe.txt
+            echo '```'
+          } > body.md
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "deriv-egress-probe result ($(date -u +%Y-%m-%dT%H:%MZ))" \
+            --body-file body.md
