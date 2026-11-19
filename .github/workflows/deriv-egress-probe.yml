@@ -15,6 +15,7 @@ on:
       - 'scripts/deriv-egress-probe.mjs'
       - 'scripts/deriv-egress-handshake.mjs'
       - 'scripts/deriv-egress-sweep.mjs'
+      - 'scripts/deriv-new-api-probe.mjs'
       - '.github/workflows/deriv-egress-probe.yml'
   workflow_dispatch:
 
@@ -44,6 +45,12 @@ jobs:
         # Cloudflare, so browser-like headers cannot change it. The script
         # degrades gracefully when the optional ws package is absent.
         run: node scripts/deriv-egress-handshake.mjs | tee -a probe.txt
+
+      - name: Locate the applications API on the new platform
+        # app_register is legacy-WS-only and needs the admin scope the current
+        # token page does not offer. The new platform has application_read and a
+        # reachable HTTPS base, so look for the endpoint instead of assuming.
+        run: node scripts/deriv-new-api-probe.mjs | tee -a probe.txt
 
       - name: DNS and raw TCP context
         if: always()
