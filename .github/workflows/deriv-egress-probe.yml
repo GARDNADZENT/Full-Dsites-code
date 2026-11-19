@@ -16,6 +16,7 @@ on:
       - 'scripts/deriv-egress-handshake.mjs'
       - 'scripts/deriv-egress-sweep.mjs'
       - 'scripts/deriv-new-api-probe.mjs'
+      - 'scripts/deriv-ws-candidates.mjs'
       - '.github/workflows/deriv-egress-probe.yml'
   workflow_dispatch:
 
@@ -45,6 +46,12 @@ jobs:
         # Cloudflare, so browser-like headers cannot change it. The script
         # degrades gracefully when the optional ws package is absent.
         run: node scripts/deriv-egress-handshake.mjs | tee -a probe.txt
+
+      - name: Every known Deriv WebSocket endpoint, new and legacy
+        # The codebase already uses sockets on the new base host
+        # (api.derivws.com/socket and .../trading/v1/options/ws/public), and
+        # HTTPS there is reachable. Try them before ruling app_register out.
+        run: node scripts/deriv-ws-candidates.mjs | tee -a probe.txt
 
       - name: Locate the applications API on the new platform
         # app_register is legacy-WS-only and needs the admin scope the current
