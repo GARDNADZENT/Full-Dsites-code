@@ -24,13 +24,15 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Slider } from "@/components/ui/slider";
 import {
-  autoGenerateTierPool,
   clampMarkupRate,
   deletePoolApp,
   formatMarkupRate,
   getSuperuserDerivStatus,
   importDerivApps,
   markPayout,
+  registerAllSiteDerivApps,
+  registerSiteDerivApp,
+  repairDerivAssignments,
   MARKUP_PRESETS,
   saveSuperuserDerivToken,
   syncCommissions,
@@ -77,6 +79,26 @@ const AdminDerivAppPool = () => {
     setDefaultFeeRate(credential.defaultPlatformFeeRate ?? 17);
   }, [credential]);
 
+  // A tenant without a pinned app cannot log in at all (deriv-oauth-start returns
+  // 409 deriv_app_missing), so surface them instead of waiting for a report.
+  const unboundSites = useMemo(
+    () => sites.filter(site => site.status !== "deleted" && site.derivMode !== "custom" && !site.assignedAppId),
+    [sites],
+  );
+
+  // The token is the single credential every tenant login depends on; an expiry
+  // takes the whole platform down, so warn well before it lands.
+  const tokenDaysRemaining = credential?.tokenDaysRemaining ?? null;
+  const tokenExpired = tokenDaysRemaining !== null && tokenDaysRemaining <= 0;
+  const tokenExpiryWarning =
+    tokenDaysRemaining === null || tokenDaysRemaining === undefined
+      ? null
+      : tokenExpired
+        ? "This Deriv token has expired. Tenant logins will fail until a new token is saved."
+        : tokenDaysRemaining <= 14
+          ? `This Deriv token expires in ${tokenDaysRemaining} day${tokenDaysRemaining === 1 ? "" : "s"}. Save a new token to avoid a platform-wide login outage.`
+          : null;
+
   const refresh = async () => {
     await queryClient.invalidateQueries({ queryKey: ["superuser-deriv-status"] });
     await queryClient.invalidateQueries({ queryKey: ["markup-statistics"] });
@@ -115,13 +137,30 @@ const AdminDerivAppPool = () => {
       return "Superuser Deriv token disconnected";
     });
 
-  const generatePool = () =>
-    run("tiers", async () => {
-      const result = await autoGenerateTierPool([0, 1, 1.5, 2, 2.5, 3]);
-      const parts = [`${result.created.length} tier app${result.created.length === 1 ? "" : "s"} created`];
-      if (result.skipped.length) parts.push(`${result.skipped.length} already existed`);
-      if (result.errors.length) parts.push(`${result.errors.length} failed`);
+  const registerAll = () =>
+    run("register-all", async () => {
+      const result = await registerAllSiteDerivApps();
+      const parts = [`${result.registered.length} tenant app${result.registered.length === 1 ? "" : "s"} registered`];
+      if (result.skipped) parts.push(`${result.skipped} already bound`);
+      if (result.failed.length) parts.push(`${result.failed.length} failed`);
       return parts.join(" · ");
+    });
+
+  const registerOne = (siteId: string) =>
+    run(`register:${siteId}`, async () => {
+      const result = await registerSiteDerivApp(siteId);
+      const warning = result.registrationWarnings?.length ? ` · ${result.registrationWarnings[0]}` : "";
+      return result.status === "already_registered"
+        ? `${result.site.name} already has app ${result.app.appId}`
+        : `${result.site.name} → app ${result.app.appId}${warning}`;
+    });
+
+  const repairAssignments = () =>
+    run("repair", async () => {
+      const result = await repairDerivAssignments();
+      return result.repairedSites === 0
+        ? "Every site is already bound to its own app"
+        : `${result.repairedSites} site${result.repairedSites === 1 ? "" : "s"} rebound to their own app`;
     });
 
   const importApps = () =>
@@ -297,27 +336,30 @@ const AdminDerivAppPool = () => {
                 Scopes: {credential?.scopes?.length ? credential.scopes.join(", ") : "none yet"} · admin
                 scope {credential?.hasAdminScope ? "present" : "required for app_register"}.
               </p>
+              {tokenExpiryWarning ? (
+                <p className={`text-[11px] ${tokenExpired ? "text-red-300" : "text-amber-300"}`}>
+                  {tokenExpiryWarning}
+                </p>
+              ) : null}
             </div>
 
             <div className="space-y-3 rounded-lg border border-white/10 bg-white/5 p-4">
               <p className="text-sm font-medium text-foreground flex items-center gap-2">
                 <Sparkles className="h-4 w-4 text-primary" />
-                One-click tier pool
+                One app per tenant
               </p>
               <p className="text-xs text-muted-foreground">
-                Registers a v2 DevHub app for each 0%–3% markup tier and rebalances every platform-managed site.
+                Registers a separate Deriv app for each tenant site, with its own App ID and callback, so every
+                tenant's markup stays attributable and the split stays auditable.
               </p>
-              <div className="flex flex-wrap gap-1.5">
-                {[0, 1, 1.5, 2, 2.5, 3].map(tier => (
-                  <span key={tier} className="rounded-full border border-white/10 bg-white/5 px-2 py-0.5 text-[11px] text-muted-foreground">
-                    {formatMarkupRate(tier)}
-                  </span>
-                ))}
-              </div>
               <div className="flex flex-wrap gap-2">
-                <Button onClick={() => void generatePool()} disabled={busy === "tiers" || !credential?.connected}>
-                  {busy === "tiers" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
-                  Generate 0–3% tier pool
+                <Button onClick={() => void registerAll()} disabled={busy === "register-all" || !credential?.connected}>
+                  {busy === "register-all" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
+                  Register tenant apps
+                </Button>
+                <Button variant="outline" onClick={() => void repairAssignments()} disabled={busy === "repair"}>
+                  {busy === "repair" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
+                  Repair assignments
                 </Button>
                 <Button variant="outline" onClick={() => void importApps()} disabled={busy === "import" || !credential?.connected}>
                   {busy === "import" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ArrowDownUp className="mr-2 h-4 w-4" />}
@@ -327,6 +369,14 @@ const AdminDerivAppPool = () => {
               {!credential?.connected ? (
                 <p className="text-[11px] text-amber-300">Connect a Deriv admin token to auto-register apps.</p>
               ) : null}
+              {unboundSites.length ? (
+                <p className="text-[11px] text-muted-foreground">
+                  {unboundSites.length} tenant site{unboundSites.length === 1 ? "" : "s"} without an app:{" "}
+                  {unboundSites.map(site => site.name).join(", ")}
+                </p>
+              ) : (
+                <p className="text-[11px] text-emerald-300">Every tenant site has its own app.</p>
+              )}
             </div>
           </div>
         </CardContent>
@@ -471,20 +521,21 @@ const AdminDerivAppPool = () => {
                 <tr className="border-b border-white/10">
                   <th className="py-2 pr-3 font-medium">Site</th>
                   <th className="py-2 pr-3 font-medium">Owner</th>
-                  <th className="py-2 pr-3 font-medium">Mode</th>
+                  <th className="py-2 pr-3 font-medium">Deriv app</th>
                   <th className="py-2 pr-3 font-medium">Markup</th>
                   <th className="py-2 pr-3 font-medium">Traders</th>
                   <th className="py-2 pr-3 font-medium">Gross</th>
                   <th className="py-2 pr-3 font-medium">Superuser</th>
                   <th className="py-2 pr-3 font-medium">Owner net</th>
                   <th className="py-2 pr-3 font-medium">Unpaid</th>
+                  <th className="py-2 pr-3 font-medium">Payout</th>
                   <th className="py-2 pr-3 font-medium" />
                 </tr>
               </thead>
               <tbody>
                 {sites.length === 0 ? (
                   <tr>
-                    <td colSpan={10} className="py-4 text-center text-muted-foreground">No sites yet.</td>
+                    <td colSpan={11} className="py-4 text-center text-muted-foreground">No sites yet.</td>
                   </tr>
                 ) : (
                   sites.map(site => (
@@ -498,9 +549,46 @@ const AdminDerivAppPool = () => {
                         {site.ownerDerivLoginId ? <span className="block text-[11px]">{site.ownerDerivLoginId}</span> : null}
                       </td>
                       <td className="py-2 pr-3">
-                        <span className={`rounded-full px-2 py-0.5 text-[11px] ${site.derivMode === "custom" ? "bg-white/10 text-muted-foreground" : "bg-primary/20 text-primary"}`}>
-                          {site.derivMode === "custom" ? "custom" : "pool"}
-                        </span>
+                        {site.derivMode === "custom" ? (
+                          <span className="rounded-full bg-white/10 px-2 py-0.5 text-[11px] text-muted-foreground">
+                            own app
+                          </span>
+                        ) : site.assignedAppId ? (
+                          <div className="flex items-center gap-2">
+                            <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] text-emerald-300">
+                              app {site.assignedAppId}
+                            </span>
+                            <button
+                              type="button"
+                              className="text-[11px] text-muted-foreground underline decoration-dotted hover:text-foreground"
+                              onClick={() => void registerOne(site.id)}
+                              disabled={busy === `register:${site.id}`}
+                              title="Re-register this tenant's app"
+                            >
+                              {busy === `register:${site.id}` ? "working…" : "re-register"}
+                            </button>
+                          </div>
+                        ) : (
+                          <div className="flex items-center gap-2">
+                            <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] text-amber-300">
+                              no app
+                            </span>
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="h-6 px-2 text-[11px]"
+                              onClick={() => void registerOne(site.id)}
+                              disabled={busy === `register:${site.id}` || !credential?.connected}
+                            >
+                              {busy === `register:${site.id}` ? (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                              ) : (
+                                <Sparkles className="h-3 w-3" />
+                              )}
+                              <span className="ml-1">Register</span>
+                            </Button>
+                          </div>
+                        )}
                       </td>
                       <td className="py-2 pr-3 text-muted-foreground">
                         {formatMarkupRate(site.requestedMarkupRate)}
@@ -510,7 +598,10 @@ const AdminDerivAppPool = () => {
                       <td className="py-2 pr-3 text-foreground">{formatAmount(site.grossMarkup, site.currency)}</td>
                       <td className="py-2 pr-3 text-foreground">{formatAmount(site.superuserFee, site.currency)}</td>
                       <td className="py-2 pr-3 text-emerald-300">{formatAmount(site.ownerNet, site.currency)}</td>
-                      <td className="py-2 pr-3 text-muted-foreground">{formatAmount(site.ownerPending, site.currency)}</td>
+                      <td className="py-2 pr-3 text-muted-foreground">
+                        {formatAmount(site.ownerPending, site.currency)}
+                        <span className="block text-[11px]">{formatMarkupRate(site.requestedMarkupRate)} markup</span>
+                      </td>
                       <td className="py-2 pr-3">
                         <Button
                           size="sm"
