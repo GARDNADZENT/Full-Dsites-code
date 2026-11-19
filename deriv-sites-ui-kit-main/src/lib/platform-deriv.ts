@@ -77,6 +77,8 @@ export type SuperuserDerivCredential = {
   lastVerifiedAt: string | null;
   lastSyncedAt: string | null;
   lastError: string | null;
+  tokenValidUntil: string | null;
+  tokenDaysRemaining: number | null;
 };
 
 export type PlatformSiteSummary = {
@@ -364,15 +366,49 @@ export async function upsertPoolApp(input: {
   return invokeManagePlatformDeriv({ action: "upsert_pool_app", ...input });
 }
 
-export async function autoGenerateTierPool(
-  tiers: number[] = [0, 1, 1.5, 2, 2.5, 3],
-): Promise<{
-  created: Array<{ appId: string; markupPercentage: number; name: string }>;
-  skipped: number[];
-  errors: Array<{ tier: number; message: string }>;
-  rebalancedSites: number;
-}> {
-  return invokeManagePlatformDeriv({ action: "auto_generate_tier_pool", tiers });
+export type SiteDerivRegistration = {
+  status: "registered" | "already_registered";
+  app: {
+    id: string;
+    name: string;
+    appId: string;
+    oauthClientId: string;
+    callbackUri: string;
+    markupPercentage: number;
+  };
+  site: { id: string; name: string };
+  registrationWarnings?: string[];
+};
+
+export type BulkSiteDerivRegistration = {
+  registered: Array<{ siteId: string; siteName: string; appId: string }>;
+  failed: Array<{ siteId: string; siteName: string; message: string }>;
+  skipped: number;
+};
+
+/**
+ * Register the tenant's own Deriv app and pin it to that site.
+ *
+ * Each tenant gets a distinct App ID, client ID and callback so the operator can
+ * attribute markup per tenant and pay out their share minus the platform fee.
+ */
+export async function registerSiteDerivApp(
+  siteId: string,
+): Promise<SiteDerivRegistration> {
+  return invokeManagePlatformDeriv({ action: "register_site_deriv_app", siteId });
+}
+
+/** Register every tenant site that does not have an app yet. */
+export async function registerAllSiteDerivApps(): Promise<BulkSiteDerivRegistration> {
+  return invokeManagePlatformDeriv({ action: "register_all_site_deriv_apps" });
+}
+
+/**
+ * Undo app assignments that override a site's pinned binding, without handing any
+ * tenant another tenant's application.
+ */
+export async function repairDerivAssignments(): Promise<{ repairedSites: number }> {
+  return invokeManagePlatformDeriv({ action: "repair_deriv_assignments" });
 }
 
 export async function importDerivApps(): Promise<{
