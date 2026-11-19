@@ -440,6 +440,67 @@ export async function repairDerivAssignments(): Promise<{ repairedSites: number 
   return invokeManageSiteDerivApps({ action: "repair_deriv_assignments" });
 }
 
+/** Bind an existing pool app to one site (manual path when registration is blocked). */
+export async function assignPoolAppToSite(input: {
+  siteId: string;
+  platformDerivAppId: string;
+}): Promise<{ status: string; appId: string | null; siteId: string }> {
+  return invokeManageSiteDerivApps({ action: "assign_app_to_site", ...input });
+}
+
+/**
+ * Record a DevHub-created app and pin it to one tenant in a single step.
+ *
+ * Used when automatic registration is blocked: the operator creates the app once
+ * in DevHub, then this writes it to the pool and binds it without any WebSocket
+ * call.
+ */
+export async function addAppForSite(input: {
+  siteId: string;
+  derivAppId: string;
+  name?: string;
+  oauthClientId?: string;
+  clientSecret?: string;
+  callbackUri?: string;
+  markupPercentage?: number;
+}): Promise<SiteDerivRegistration> {
+  return invokeManageSiteDerivApps({ action: "add_app_for_site", ...input });
+}
+
+export type SuperuserTokenVerification = {
+  ok: boolean;
+  verifiedAccount: { loginid: string; email: string; scopes: string[] } | null;
+  verification: {
+    reachable: boolean;
+    status: number | null;
+    detail: string;
+    accounts?: Array<{ accountId: string; accountType: string; currency: string }>;
+  } | null;
+  appRegistration: {
+    available: boolean;
+    detail: string;
+    note: string;
+  } | null;
+};
+
+/**
+ * Save the superuser Deriv token, verifying it over Deriv's REST API.
+ *
+ * Verification deliberately avoids the WebSocket API: the legacy WS hosts that
+ * carry `authorize` and `app_register` are unreachable from the platform network,
+ * so a WS check would reject valid tokens with a network error.
+ */
+export async function saveSuperuserToken(input: {
+  apiToken?: string;
+  clearToken?: boolean;
+  wsAppId?: string;
+  derivAppId?: string;
+  defaultCallbackUri?: string;
+  defaultPlatformFeeRate?: number;
+}): Promise<SuperuserTokenVerification> {
+  return invokeManageSiteDerivApps({ action: "save_superuser_token", ...input });
+}
+
 export async function importDerivApps(): Promise<{
   imported: number;
   totalFound: number;

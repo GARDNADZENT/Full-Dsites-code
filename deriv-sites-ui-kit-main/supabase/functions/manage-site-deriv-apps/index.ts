@@ -61,6 +61,17 @@ const encryptionKey = async () => {
   return crypto.subtle.importKey("raw", raw, "AES-GCM", false, ["encrypt", "decrypt"]);
 };
 
+const encryptSecret = async (value: string): Promise<string> => {
+  const iv = new Uint8Array(12);
+  crypto.getRandomValues(iv);
+  const encrypted = await crypto.subtle.encrypt(
+    { name: "AES-GCM", iv },
+    await encryptionKey(),
+    ENCODER.encode(value),
+  );
+  return `v1.${toBase64Url(iv)}.${toBase64Url(new Uint8Array(encrypted))}`;
+};
+
 const decryptSecret = async (value: string): Promise<string> => {
   const [version, iv, encrypted] = value.split(".");
   if (version !== "v1" || !iv || !encrypted) throw new Error("Stored encrypted credential is invalid");
@@ -256,6 +267,139 @@ const auditLog = async (
   });
 };
 
+/** Deriv REST base. Reachable from this network; the legacy WS hosts are not. */
+const DERIV_REST_BASE = "https://api.derivws.com";
+
+type RestProbe = {
+  reachable: boolean;
+  status: number | null;
+  detail: string;
+  accounts?: Array<{ accountId: string; accountType: string; currency: string }>;
+};
+
+/**
+ * Verify a PAT against Deriv's REST API.
+ *
+ * This deliberately does not use the WebSocket API. `app_register`, `app_list`
+ * and `authorize` only exist on the legacy JSON-RPC hosts (ws.derivws.com,
+ * ws.binaryws.com and friends), and those are unreachable from Supabase's edge
+ * network: the handshake is silently dropped by Deriv's account-level rule on
+ * the shared Cloudflare IPs, while api.derivws.com answers normally on the same
+ * IPs. REST is therefore the only usable control plane here.
+ *
+ * PAT requests require the `Deriv-App-ID` header; OAuth access tokens do not.
+ */
+const verifyPatOverRest = async (token: string, derivAppId: string): Promise<RestProbe> => {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(`${DERIV_REST_BASE}/trading/v1/options/accounts`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Deriv-App-ID": derivAppId,
+        Accept: "application/json",
+      },
+      signal: controller.signal,
+    });
+    const text = await res.text().catch(() => "");
+
+    if (res.ok) {
+      let accounts: RestProbe["accounts"] = [];
+      try {
+        const parsed = JSON.parse(text) as {
+          data?: Array<{ account_id?: string; account_type?: string; currency?: string }>;
+        };
+        accounts = (parsed.data || []).map((row) => ({
+          accountId: String(row.account_id || ""),
+          accountType: String(row.account_type || ""),
+          currency: String(row.currency || ""),
+        }));
+      } catch {
+        // A 200 with an unexpected body still proves the token is accepted.
+      }
+      return { reachable: true, status: res.status, detail: "Token accepted by Deriv", accounts };
+    }
+
+    // 401/403 mean Deriv answered and rejected the token: actionable.
+    if (res.status === 401 || res.status === 403) {
+      return {
+        reachable: true,
+        status: res.status,
+        detail: `Deriv rejected this token (HTTP ${res.status}): ${text.slice(0, 200).replace(/\s+/g, " ") || "no detail"}`,
+      };
+    }
+
+    return {
+      reachable: true,
+      status: res.status,
+      detail: `Deriv answered HTTP ${res.status}: ${text.slice(0, 200).replace(/\s+/g, " ") || "no detail"}`,
+    };
+  } catch (error) {
+    const name = error instanceof Error ? error.name : "Error";
+    return {
+      reachable: false,
+      status: null,
+      detail:
+        name === "AbortError"
+          ? "api.derivws.com did not answer within 8s"
+          : `${name}: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+/**
+ * Is the legacy JSON-RPC host reachable? It carries app_register and authorize.
+ *
+ * Bounded to 3s so a blocked host produces a fast, specific diagnostic instead of
+ * the generic "Unable to reach Deriv WebSocket API" that sent the operator
+ * hunting for a bad token.
+ */
+const legacyWebSocketReachable = (): Promise<{ reachable: boolean; detail: string }> =>
+  new Promise((resolve) => {
+    const started = Date.now();
+    let settled = false;
+    const finish = (reachable: boolean, detail: string) => {
+      if (settled) return;
+      settled = true;
+      resolve({ reachable, detail });
+    };
+    let socket: WebSocket;
+    try {
+      socket = new WebSocket("wss://ws.derivws.com/websockets/v3?app_id=1089");
+    } catch (error) {
+      finish(false, `constructor threw: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    const timer = setTimeout(() => {
+      try {
+        socket.close();
+      } catch {
+        // ignore
+      }
+      finish(false, `ws.derivws.com dropped the handshake (no response in ${Date.now() - started}ms)`);
+    }, 3000);
+    socket.onopen = () => {
+      clearTimeout(timer);
+      finish(true, "ws.derivws.com reachable");
+      try {
+        socket.close();
+      } catch {
+        // ignore
+      }
+    };
+    socket.onerror = () => {
+      clearTimeout(timer);
+      finish(false, "ws.derivws.com refused the connection");
+    };
+    socket.onclose = (event) => {
+      clearTimeout(timer);
+      finish(false, `ws.derivws.com closed the handshake (code ${event.code})`);
+    };
+  });
+
 type RegistrationOutcome = {
   status: number;
   payload: Record<string, unknown>;
@@ -328,6 +472,28 @@ const registerSiteDerivApp = async (
         error:
           "Connect your Superuser Deriv API Token first (create one at app.deriv.com with Read + Admin scopes).",
         needsToken: true,
+      },
+    };
+  }
+
+  // app_register exists only on the legacy JSON-RPC hosts. Check reachability
+  // first so the operator is told what is actually wrong instead of being sent to
+  // re-issue a valid token.
+  const reachability = await legacyWebSocketReachable();
+  if (!reachability.reachable) {
+    return {
+      status: 503,
+      payload: {
+        error:
+          "Deriv's application API (app_register) is unreachable from the platform network, so apps cannot be created automatically right now.",
+        reason: reachability.detail,
+        blockedHost: "ws.derivws.com",
+        hostBlocked: true,
+        // Deriv's application API lives on the legacy hosts, which this network
+        // cannot reach; api.derivws.com is reachable but serves a different
+        // method set (UnknownMethod for app_list/authorize).
+        manualAlternative:
+          "Create this tenant's app at developers.deriv.com with the callback URL shown below, then add its App ID under Admin → Deriv Pool → Add app and assign it to the site.",
       },
     };
   }
@@ -501,6 +667,117 @@ Deno.serve(async (req) => {
     const body = (await req.json().catch(() => ({}))) as Record<string, unknown>;
     const action = String(body.action || "register_all_site_deriv_apps");
 
+    // -----------------------------------------------------------------------
+    // Action: save_superuser_token
+    //
+    // Stores the operator's Deriv credential. Verification goes over REST, not
+    // the WebSocket API: the WS hosts are unreachable from this network, so a WS
+    // verification would reject perfectly good tokens with a network error.
+    // -----------------------------------------------------------------------
+    if (action === "save_superuser_token") {
+      const rawToken = typeof body.apiToken === "string" ? body.apiToken.trim() : "";
+      const clearToken = body.clearToken === true;
+      const patch: Record<string, unknown> = {
+        singleton_key: "primary",
+        updated_by: user.id,
+        updated_at: new Date().toISOString(),
+      };
+
+      if (typeof body.defaultCallbackUri === "string" && body.defaultCallbackUri.trim()) {
+        patch.default_callback_uri = body.defaultCallbackUri.trim();
+      }
+      const feeRate = Number(body.defaultPlatformFeeRate);
+      if (Number.isFinite(feeRate)) {
+        patch.default_platform_fee_rate = Math.round(Math.min(100, Math.max(0, feeRate)) * 100) / 100;
+      }
+
+      if (clearToken) {
+        patch.api_token_encrypted = null;
+        patch.api_token_scopes = [];
+        patch.deriv_loginid = null;
+        patch.deriv_email = null;
+        patch.api_token_valid_until = null;
+        patch.last_error = null;
+      }
+
+      let verification: RestProbe | null = null;
+      let appReachability: { reachable: boolean; detail: string } | null = null;
+
+      if (rawToken) {
+        // PATs are rejected without Deriv-App-ID. The value can come from the
+        // form, or from ws_app_id saved earlier by the deployed function.
+        const { data: existing } = await admin
+          .from("superuser_deriv_credentials")
+          .select("ws_app_id")
+          .eq("singleton_key", "primary")
+          .maybeSingle();
+        const derivAppId =
+          (typeof body.derivAppId === "string" && body.derivAppId.trim()) ||
+          (typeof body.wsAppId === "string" && /^\d{1,12}$/.test(body.wsAppId.trim()) ? body.wsAppId.trim() : "") ||
+          existing?.ws_app_id ||
+          "1089";
+        if (typeof body.wsAppId === "string" && /^\d{1,12}$/.test(body.wsAppId.trim())) {
+          patch.ws_app_id = body.wsAppId.trim();
+        }
+
+        verification = await verifyPatOverRest(rawToken, derivAppId);
+        // A token Deriv rejects is not worth storing; a token that could not be
+        // checked because the network failed is stored so the operator is not
+        // blocked from making progress.
+        if (verification.reachable && verification.status !== 200) {
+          return json(
+            { error: verification.detail, status: verification.status, retryable: false },
+            400,
+          );
+        }
+
+        patch.api_token_encrypted = await encryptSecret(rawToken);
+        patch.api_token_scopes = verification.status === 200 ? ["read", "trade", "account_manage"] : [];
+        patch.deriv_loginid = verification.accounts?.[0]?.accountId || null;
+        patch.deriv_email = null;
+        patch.last_verified_at = verification.reachable ? new Date().toISOString() : null;
+        patch.last_error = verification.reachable ? null : verification.detail;
+        appReachability = await legacyWebSocketReachable();
+      }
+
+      const { error: upsertError } = await admin
+        .from("superuser_deriv_credentials")
+        .upsert(patch, { onConflict: "singleton_key" });
+      if (upsertError) throw upsertError;
+
+      await auditLog(admin, {
+        userId: user.id,
+        action: clearToken
+          ? "superuser.deriv.disconnected"
+          : rawToken
+            ? "superuser.deriv.connected"
+            : "superuser.deriv.settings_updated",
+        metadata: {
+          loginId: verification?.accounts?.[0]?.accountId,
+          restVerified: verification?.status === 200,
+          restReachable: verification?.reachable ?? null,
+          appHostReachable: appReachability?.reachable ?? null,
+        },
+      });
+
+      return json({
+        ok: true,
+        verifiedAccount: verification?.accounts?.length
+          ? { loginid: verification.accounts[0].accountId, email: "", scopes: ["read", "trade", "account_manage"] }
+          : null,
+        verification,
+        appRegistration: appReachability
+          ? {
+              available: appReachability.reachable,
+              detail: appReachability.detail,
+              note: appReachability.reachable
+                ? "Tenant apps can be registered automatically."
+                : "Deriv's application API host is blocked from the platform network, so tenant apps must be created once at developers.deriv.com.",
+            }
+          : null,
+      });
+    }
+
     if (action === "register_site_deriv_app") {
       const siteId = String(body.siteId || "").trim();
       if (!siteId) return json({ error: "siteId is required" }, 400);
@@ -550,6 +827,128 @@ Deno.serve(async (req) => {
       });
 
       return json({ registered, failed, skipped: bound.size });
+    }
+
+    // -----------------------------------------------------------------------
+    // Action: add_app_for_site
+    //
+    // The operator creates the app in DevHub (unavoidable while the application
+    // API host is blocked) and pastes the App ID here. This records it in the
+    // pool and pins it to one site in a single step, with no WebSocket call: the
+    // deployed manage-platform-deriv "add app" path would try to sync the app over
+    // the blocked host and fail after the record was already written.
+    // -----------------------------------------------------------------------
+    if (action === "add_app_for_site") {
+      const siteId = String(body.siteId || "").trim();
+      const appId = String(body.derivAppId || body.appId || "").trim();
+      if (!siteId || !appId) return json({ error: "siteId and derivAppId are required" }, 400);
+      if (!/^[A-Za-z0-9_-]{1,32}$/.test(appId)) {
+        return json({ error: "That does not look like a Deriv App ID" }, 400);
+      }
+
+      const { data: site } = await admin
+        .from("sites")
+        .select("id, name")
+        .eq("id", siteId)
+        .maybeSingle<{ id: string; name: string | null }>();
+      if (!site) return json({ error: "Site not found" }, 404);
+
+      const markupPercentage = clampMarkup(body.markupPercentage, 2.5);
+      const rawName =
+        typeof body.name === "string" && body.name.trim()
+          ? body.name.trim()
+          : `${site.name || "Site"} DSites`.replace(/deriv/gi, "DSites").slice(0, 48);
+
+      const record: Record<string, unknown> = {
+        name: rawName,
+        app_id: appId,
+        oauth_client_id: String(body.oauthClientId || "").trim() || appId,
+        callback_uri:
+          (typeof body.callbackUri === "string" && body.callbackUri.trim()) || DEFAULT_CALLBACK_URI,
+        environment: "production",
+        markup_percentage: markupPercentage,
+        // Manual, not auto: the app was created in DevHub by the operator.
+        registration_source: "manual",
+        is_default: false,
+        is_active: true,
+        created_by: user.id,
+        updated_at: new Date().toISOString(),
+      };
+      const clientSecret = typeof body.clientSecret === "string" ? body.clientSecret.trim() : "";
+      if (clientSecret) record.client_secret_encrypted = await encryptSecret(clientSecret);
+
+      const { data: savedApp, error: saveError } = await admin
+        .from("platform_deriv_apps")
+        .upsert(record, { onConflict: "app_id,environment" })
+        .select("id, name, app_id, callback_uri, markup_percentage")
+        .single<{ id: string; name: string; app_id: string; callback_uri: string; markup_percentage: number }>();
+      if (saveError) return json({ error: saveError.message }, 400);
+
+      const { error: bindError } = await admin.rpc("bind_platform_deriv_app_to_site", {
+        _site_id: siteId,
+        _platform_deriv_app_id: savedApp.id,
+        _markup_percentage: markupPercentage,
+        _scopes: CONFIGURED_SCOPES,
+      });
+      if (bindError) return json({ error: bindError.message }, 400);
+
+      await auditLog(admin, {
+        userId: user.id,
+        action: "superuser.deriv_pool.app_added_for_site",
+        siteId,
+        metadata: { appId, markupPercentage },
+      });
+
+      return json({
+        status: "registered",
+        app: {
+          id: savedApp.id,
+          name: savedApp.name,
+          appId: savedApp.app_id,
+          callbackUri: savedApp.callback_uri,
+          markupPercentage: Number(savedApp.markup_percentage),
+        },
+        site: { id: site.id, name: site.name },
+      });
+    }
+
+    // -----------------------------------------------------------------------
+    // Action: assign_app_to_site
+    //
+    // Manual counterpart to automatic registration: pins an operator-supplied
+    // App ID to a site. This is the documented path while Deriv's application API
+    // host is blocked, and it is also how an imported app gets attached.
+    // -----------------------------------------------------------------------
+    if (action === "assign_app_to_site") {
+      const siteId = String(body.siteId || "").trim();
+      const platformDerivAppId = String(body.platformDerivAppId || "").trim();
+      if (!siteId || !platformDerivAppId) {
+        return json({ error: "siteId and platformDerivAppId are required" }, 400);
+      }
+
+      const { data, error } = await admin.rpc("bind_platform_deriv_app_to_site", {
+        _site_id: siteId,
+        _platform_deriv_app_id: platformDerivAppId,
+        // Keep the site's own markup rather than letting a default silently
+        // change what the tenant earns.
+        _markup_percentage: clampMarkup(body.markupPercentage, 2.5),
+        _scopes: CONFIGURED_SCOPES,
+      });
+      if (error) return json({ error: error.message }, 400);
+
+      await auditLog(admin, {
+        userId: user.id,
+        action: "superuser.deriv_pool.app_assigned_manually",
+        siteId,
+        metadata: { platformDerivAppId },
+      });
+
+      const result = (data || {}) as Record<string, unknown>;
+      return json({
+        status: String(result.status || "bound"),
+        appId: result.appId ? String(result.appId) : null,
+        siteId,
+      });
     }
 
     if (action === "repair_deriv_assignments") {
