@@ -11,14 +11,31 @@
  * now goes through these helpers.
  */
 
-export type OperationalStatus = "deployed" | "draft" | "provisioning" | "failed";
+export type OperationalStatus =
+  | "deployed"
+  | "draft"
+  | "provisioning"
+  | "stalled"
+  | "failed";
 
 export type SiteIntegrationSummary = {
   status: string | null;
   netlify_site_url: string | null;
   netlify_site_name: string | null;
   last_error: string | null;
+  /** Heartbeat: bumped by a DB trigger on every write. Used to detect stalls. */
+  updated_at?: string | null;
 } | null;
+
+/**
+ * How long a "provisioning" row may sit untouched before we call it stalled.
+ *
+ * Must match the interval used by the `fail_stale_site_provisioning()` sweeper so
+ * the UI and the database agree on when a claim is dead. The provisioning
+ * function typically returns in a few seconds; 10 minutes is far beyond any
+ * healthy run, including a slow Vercel attach.
+ */
+export const PROVISIONING_STALL_MINUTES = 10;
 
 export type OperationalState = {
   key: OperationalStatus;
@@ -50,7 +67,28 @@ const STATES: Record<OperationalStatus, Omit<OperationalState, "key">> = {
     tone: "bg-amber-500/10 text-amber-400 border-amber-500/20",
     isLive: false,
   },
+  stalled: {
+    label: "Stalled — retry",
+    tone: "bg-orange-500/10 text-orange-400 border-orange-500/20",
+    isLive: false,
+  },
 };
+
+/**
+ * True when a `provisioning` integration has not been touched recently enough.
+ *
+ * Returns false when the timestamp is missing: an unknown age is not evidence of
+ * a stall, and guessing would flap the UI on older rows.
+ */
+export function isProvisioningStalled(
+  updatedAt?: string | null,
+  now: number = Date.now(),
+): boolean {
+  if (!updatedAt) return false;
+  const touched = new Date(updatedAt).getTime();
+  if (Number.isNaN(touched)) return false;
+  return now - touched > PROVISIONING_STALL_MINUTES * 60_000;
+}
 
 /**
  * Resolve the state shown to the operator.
@@ -71,7 +109,12 @@ export function resolveOperationalState(input: {
     return { key: "failed", ...STATES.failed };
   }
   if (integrationStatus === "provisioning") {
-    return { key: "provisioning", ...STATES.provisioning };
+    // A killed invocation never reaches the catch block that writes `failed`, so
+    // the row sits at `provisioning` forever. Treat an untouched row as stalled
+    // once the heartbeat is older than the sweeper interval.
+    return isProvisioningStalled(input.integration?.updated_at)
+      ? { key: "stalled", ...STATES.stalled }
+      : { key: "provisioning", ...STATES.provisioning };
   }
   if (integrationStatus === "connected") {
     // Connected alone isn't enough — we need somewhere to point the browser.

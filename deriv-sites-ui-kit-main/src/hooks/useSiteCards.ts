@@ -36,6 +36,7 @@ export type SiteCardSummary = {
         netlify_site_url: string | null;
         netlify_site_name: string | null;
         last_error: string | null;
+        updated_at: string | null;
       }>
     | null;
   site_configurations?:
@@ -65,7 +66,7 @@ export function useSiteCards() {
           active_configuration_version,
           domain_purchases(domain_name),
           site_domains(id, hostname, is_primary, status, is_verified, ssl_status),
-          site_integrations(status, netlify_site_url, netlify_site_name, last_error),
+          site_integrations(status, netlify_site_url, netlify_site_name, last_error, updated_at),
           site_configurations(template_id, status),
           site_deriv_apps(id)
         `,

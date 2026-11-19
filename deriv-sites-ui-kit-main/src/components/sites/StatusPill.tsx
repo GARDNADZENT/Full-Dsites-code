@@ -27,6 +27,7 @@ const StatusPill = ({
         "h-1.5 w-1.5 rounded-full",
         state.key === "deployed" && "bg-emerald-400",
         state.key === "provisioning" && "bg-sky-400 animate-pulse",
+        state.key === "stalled" && "bg-orange-400",
         state.key === "failed" && "bg-red-400",
         state.key === "draft" && "bg-amber-400",
       )}

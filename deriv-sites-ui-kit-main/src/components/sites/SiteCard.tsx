@@ -168,6 +168,13 @@ const SiteCard = ({
         </p>
       ) : null}
 
+      {state.key === "stalled" ? (
+        <p className="rounded-lg border border-orange-500/20 bg-orange-500/10 p-2 text-[11px] text-orange-300">
+          The last claim never reported back, so nothing was attached. Open the
+          site and retry the claim.
+        </p>
+      ) : null}
+
       <div className="mt-auto flex items-center gap-2">
         <button
           type="button"

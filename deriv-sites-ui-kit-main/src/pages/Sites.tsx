@@ -141,7 +141,7 @@ const Sites = () => {
     );
   }
 
-  const attention = byStatus("failed");
+  const attention = byStatus("failed") + byStatus("stalled");
 
   return (
     <div className="flex flex-1 flex-col">
@@ -223,8 +223,8 @@ const Sites = () => {
           <div className="flex items-start gap-3 rounded-xl border border-red-500/20 bg-red-500/10 p-3">
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-red-400" />
             <p className="text-xs text-red-200">
-              {attention} site{attention > 1 ? "s" : ""} failed to deploy. Open
-              the site to see the error and retry the claim — the hostname stays
+              {attention} site{attention > 1 ? "s" : ""} need attention. Open the
+              site to see the error and retry the claim — the hostname stays
               reserved in the meantime.
             </p>
           </div>
