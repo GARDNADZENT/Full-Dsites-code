@@ -18,6 +18,10 @@
       "destination": "https://fanrhtqyjajhacrmrbfv.supabase.co/functions/v1/manage-platform-deriv"
     },
     {
+      "source": "/api/manage-site-deriv-apps",
+      "destination": "https://fanrhtqyjajhacrmrbfv.supabase.co/functions/v1/manage-site-deriv-apps"
+    },
+    {
       "source": "/((?!api/|assets/|favicon\\.ico).*)",
       "destination": "/index.html"
     }
