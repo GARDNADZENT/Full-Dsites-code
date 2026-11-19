@@ -130,11 +130,15 @@ const AdminDerivAppPool = () => {
       setTokenInput("");
 
       // The token can be stored and verified by Deriv while app registration is
-      // still impossible, because app_register lives on a host this network cannot
-      // reach. Say so plainly instead of implying everything works.
+      // still unavailable. Say why accurately, because the reason is easy to get
+      // wrong: it is NOT a missing `admin` scope. Current OAuth 2.0 apps use the
+      // trade / account_manage / application_read / payment scope set, which has
+      // no admin scope at all. app_register belongs to Deriv's legacy stack
+      // (legacy WebSocket only, no REST equivalent), and the legacy WebSocket
+      // hosts return Cloudflare 520 from server networks.
       if (result.appRegistration && !result.appRegistration.available) {
         toast.warning(
-          "Token saved. Automatic app creation is unavailable: Deriv's application API host is blocked from the platform network. Create each tenant's app at developers.deriv.com, then add it under Add app.",
+          "Token saved. Automatic app creation is unavailable: Deriv's application methods (app_register) exist only on the legacy WebSocket API, which server networks cannot reach. Register a new application at developers.deriv.com, then add it under Add app.",
           { duration: 12000 },
         );
       }
@@ -324,9 +328,10 @@ const AdminDerivAppPool = () => {
             <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>
-                Automatic app creation is unavailable: Deriv's application API (app_register) lives on{" "}
-                <code className="font-mono">ws.derivws.com</code>, which this network cannot reach. Create each
-                tenant's app once at developers.deriv.com with the callback URL below, then add it under Add app.
+                Automatic app creation is unavailable: Deriv's <code className="font-mono">app_register</code> exists
+                only on the legacy WebSocket API, and the legacy hosts return Cloudflare 520 to server networks. Current
+                OAuth 2.0 apps also have no admin scope, so this is not something a token can grant. Register a new
+                application at developers.deriv.com with the callback URL below, then add it under Add app.
               </span>
             </div>
           ) : null}
@@ -393,7 +398,7 @@ const AdminDerivAppPool = () => {
                 Scopes: {credential?.scopes?.length ? credential.scopes.join(", ") : "none yet"}.
                 {credential?.hasAdminScope
                   ? " admin scope present."
-                  : " admin scope is required for app_register and can only be confirmed over Deriv's WebSocket API, which this network cannot reach — tick Admin for the token and it will be used as granted."}
+                  : " admin scope applies to legacy apps only. OAuth 2.0 apps use trade, account_manage, application_read and payment, none of which can register applications — so no token can enable automatic app creation."}
               </p>
               {tokenExpiryWarning ? (
                 <p className={`text-[11px] ${tokenExpired ? "text-red-300" : "text-amber-300"}`}>

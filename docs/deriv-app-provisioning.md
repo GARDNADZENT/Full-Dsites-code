@@ -1,79 +1,86 @@
 # Deriv app provisioning: what is possible and what is not
 
 This note exists so the question "why not one Deriv app per tenant?" does not
-have to be re-investigated. Every claim below was measured, and the scripts that
-measured it are in the repo.
+have to be re-investigated. Everything below was measured; the scripts that
+measured it are in this repo and run in CI.
 
-## What is not possible
+## The short version
 
-`app_register` is the only way to create a Deriv app, and it exists **only** on
-the WebSocket API. There is no REST equivalent — `app_register`, `app_list`,
-`app_update`, `app_delete` are all WebSocket methods, and every `/applications/*`
-REST path returns 404.
+Creating a Deriv app **programmatically is not possible**, and the reason is not
+a missing token scope. It is a platform split:
 
-From a datacenter network, that WebSocket API is not reachable:
+- **Registering apps** belongs to Deriv's **legacy stack**. `app_register`,
+  `app_list`, `app_update`, `app_delete` exist only on the legacy WebSocket API.
+  There is no REST equivalent — every `/applications/*` path on the new API
+  returns 404.
+- **Logging users in** uses the **new OAuth 2.0 stack** (`auth.deriv.com` +
+  `api.derivws.com`), whose scope set is `trade`, `account_manage`,
+  `application_read`, `payment`. **There is no `admin` scope**, so no token of
+  this kind can ever call `app_register`.
 
-| target | result |
+The two half-platforms do not meet: the thing that could register an app is on a
+host that is unreachable, and the reachable host does not have that thing.
+
+## The measurement
+
+| path | result |
 | --- | --- |
-| `ws.derivws.com/websockets/v3?app_id=…` | Cloudflare **520** after ~5.1 s |
-| `ws.derivws.com/` (host root) | Cloudflare **520** after ~5.1 s |
-| `ws.binaryws.com`, `frontend.binaryws.com` | Cloudflare 520 |
-| `api.deriv.com/` | 301 |
-| `developers.deriv.com/docs/intro/oauth/` | **200** |
-| `app.deriv.com/` | 302 |
-| `oauth.deriv.com/oauth2/authorize` | 302 |
+| `ws.derivws.com/websockets/v3` (legacy WS) | Cloudflare **520** after ~5.1 s |
+| `ws.binaryws.com`, `frontend.binaryws.com` (legacy WS) | Cloudflare **520** |
+| `api.derivws.com/trading/v1/options/ws/public` (new WS) | **reachable**, `ping` replied, `active_symbols` ok |
+| …its `app_list` / `app_register` / `app_update` / `app_get` | `UnknownMethod` — **not routed** |
+| …its `balance` | `AuthorizationRequired` — routed, gated by auth |
+| …its `authorize` | `UnknownMethod` — legacy auth is not served here |
+| `api.derivws.com/applications…` (7 path variants) | **404** |
+| `api.derivws.com/trading/v1/options/accounts` | **401** — host is real |
+| `api.deriv.com`, `app.deriv.com`, `oauth.deriv.com`, `developers.deriv.com` | 301 / 302 / 302 / 200 |
 
-The 520 carries a `cf-ray` header, so Cloudflare received the request and its
-own connection to Deriv's origin failed. Raw TCP 443 succeeds and the DNS
-answers. Everything on `deriv.com` works. So this is an **origin-side gate on
-the `*derivws.com` zone**, not egress filtering of Deriv by networks — which is
-why a browser connects to the same endpoint without trouble.
+Two things to note, because both are easy to misread:
 
-Reproduce with:
+1. The 520 carries a `cf-ray` header, so Cloudflare received the request and its
+   own connection to the legacy origin failed. Raw TCP 443 succeeds and DNS
+   answers. That is why a **browser** reaches the legacy host without trouble —
+   the block is not on the client's network, and not on Deriv-wide.
+2. The control request in the method probe is a deliberately bogus method name,
+   which answers `UnknownMethod`. Every `app_*` method answers exactly that, while
+   `balance` answers `AuthorizationRequired`. So `app_*` is absent, not merely
+   unauthorised — the distinction is measured, not assumed.
+
+Reproduce:
 
 ```
-node scripts/deriv-egress-probe.mjs      # WebSocket attempt against every host
-node scripts/deriv-egress-sweep.mjs      # plain HTTPS status sweep, no WebSocket
+node scripts/deriv-egress-probe.mjs     # every legacy WS host
+node scripts/deriv-egress-sweep.mjs     # plain HTTPS status sweep across deriv.com
+node scripts/deriv-ws-candidates.mjs    # new vs legacy WebSocket hosts
+node scripts/deriv-ws-methods.mjs       # which methods the reachable socket serves
+node scripts/deriv-new-api-probe.mjs    # is there an HTTPS applications API
 ```
 
-Two independent datacenter networks were checked (Supabase Edge and GitHub
-Actions `ubuntu-latest`, in `ord`/`iad`/`sea`), with the same result.
-
-The second blocker is the token: the stored operator token carries
-`read, trade, account_manage`. `app_register` additionally requires `admin`, and
-a PAT with `admin` must belong to a **PAT-type** app, which is a different app
-from the OAuth 2.0 client ID used for end-user login.
+Checked from two independent datacenter networks (Supabase Edge and GitHub
+Actions `ubuntu-latest`, in `ord`/`iad`/`sea`) with the same result.
 
 ## What is possible
 
-Endpoint: `POST /api/deriv-app-provisioning/apps` in `dsites-backend`
-(`new-user-interface-main/backend`). It calls `app_register` server-side, so no
-Deriv token is ever handled in React.
+`app_update` is also legacy-only, so an existing app cannot be reconfigured
+either. What remains is the operator registering an app in the DevHub UI once and
+pasting the App ID — which is what the platform does now, and which the admin UI
+states plainly rather than implying a token would fix it.
 
-```
-POST /api/deriv-app-provisioning/apps
-x-platform-admin-token: <PLATFORM_ADMIN_TOKEN>
+The `POST /api/deriv-app-provisioning/apps` endpoint in `dsites-backend`
+(`new-user-interface-main/backend`) still exists and is correct: it calls
+`app_register` over WebSocket with per-host fallback and typed errors. It is the
+right code for the day a network can reach the legacy host, or for self-hosting on
+a network that can. It returns a typed failure today rather than pretending.
 
-{ "name": "clinchy", "redirectUri": "https://dsites-admin.vercel.app/api/deriv-oauth-callback" }
-```
-
-`GET /api/deriv-app-provisioning/apps` lists apps on the account.
-
-Environment variables (server-side, never `VITE_*` / `NEXT_PUBLIC_*`):
+Environment variables (server-side only, never `VITE_*` / `NEXT_PUBLIC_*`):
 
 | variable | purpose |
 | --- | --- |
 | `PLATFORM_ADMIN_TOKEN` | shared secret guarding both routes |
-| `DERIV_ADMIN_API_TOKEN` | Deriv token with the `admin` scope on a PAT-type app |
+| `DERIV_ADMIN_API_TOKEN` | legacy token with the `admin` scope on a PAT-type app — note this is a **legacy** app model token, separate from the OAuth 2.0 client ID used for end-user login |
 
-Failure modes are returned as typed codes, so an infrastructure limit is never
-mistaken for a bad request:
-
-`network_blocked` (503) · `invalid_token` · `insufficient_scope` ·
+Failure codes: `network_blocked` (503) · `invalid_token` · `insufficient_scope` ·
 `invalid_application` · `deriv_error` (400) · `timeout` · `socket_error`
-
-If `network_blocked` is returned, the code is behaving correctly: it means that
-network cannot reach the WebSocket API either.
 
 ## Consequence for the data model
 
@@ -90,7 +97,7 @@ separable. Per-site figures remain recorded per row
 app each site used. If per-tenant apps ever become obtainable, the pool simply
 gains rows and each site is pointed at its own — no schema change needed.
 
-Per-site **attribution** does not require a per-tenant app: Deriv's OAuth
+Per-site **attribution** never required a per-tenant app: Deriv's OAuth 2.0
 accepts `t` / `affiliate_token` / `sidi` / `ca`, plus `utm_campaign`,
 `utm_medium=affiliate` and `utm_source`. That is stored per site in
 `sites.deriv_affiliate_id`.
