@@ -14,6 +14,7 @@ on:
     paths:
       - 'scripts/deriv-egress-probe.mjs'
       - 'scripts/deriv-egress-handshake.mjs'
+      - 'scripts/deriv-egress-sweep.mjs'
       - '.github/workflows/deriv-egress-probe.yml'
   workflow_dispatch:
 
@@ -35,8 +36,14 @@ jobs:
       - name: Built-in WebSocket against every Deriv host
         run: node scripts/deriv-egress-probe.mjs | tee probe.txt
 
+      - name: Plain HTTPS status sweep across Deriv hosts
+        run: node scripts/deriv-egress-sweep.mjs | tee -a probe.txt
+
       - name: Install the ws package for header control
-        run: npm install --no-save ws@8 | tee -a probe.txt
+        # Installed into scripts/ so the ESM import resolves from the runner's
+        # working tree; without this the import fails and stage 3 is skipped.
+        run: |
+          cd scripts && npm install --no-save --no-package-lock ws@8 >> ../probe.txt 2>&1
 
       - name: HTTPS status plus handshake with browser headers
         run: node scripts/deriv-egress-handshake.mjs | tee -a probe.txt
