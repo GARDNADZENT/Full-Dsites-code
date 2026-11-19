@@ -332,6 +332,51 @@ const resolveRequestHostname = (req: Request, url: URL): string => {
   return url.hostname.toLowerCase();
 };
 
+/**
+ * Every hostname the terminator may legitimately answer on for one site.
+ *
+ * A tenant reaches this function through its own /api/deriv-oauth-callback
+ * rewrite, so x-forwarded-host should name the tenant. Vercel's external rewrite
+ * does not guarantee that, and either way the tenant's own registered hostname is
+ * the same site, so both are accepted. www and bare forms are one site.
+ */
+const siteHostnames = (
+  origin: string,
+  domain: { hostname?: string | null } | null | undefined,
+): Set<string> => {
+  const allowed = new Set<string>();
+  const add = (value: unknown) => {
+    if (typeof value !== 'string') return;
+    const host = value
+      .trim()
+      .toLowerCase()
+      .replace(/^[a-z][a-z0-9+.-]*:\/\//, '')
+      .replace(/\/.*$/, '')
+      .replace(/:\d+$/, '');
+    if (!host) return;
+    allowed.add(host);
+    if (host.startsWith('www.')) allowed.add(host.slice(4));
+    else allowed.add(`www.${host}`);
+  };
+  add(origin);
+  add(domain?.hostname);
+  return allowed;
+};
+
+/**
+ * True when the request arrived on infrastructure that is not the tenant's own.
+ *
+ * Such a hop cannot be the tenant's host by definition, so it is not treated as
+ * a mismatch: the cookie-bearing redirect still targets the tenant origin, which
+ * remains the only place a session cookie is set. This is what a central admin
+ * callback host or a preview alias looks like from here.
+ */
+const isNonTenantHost = (hostname: string, allowed: Set<string>): boolean => {
+  if (allowed.has(hostname)) return false;
+  const apex = hostname.toLowerCase().split('.').slice(-2).join('.');
+  return ['vercel.app', 'vercel.sh', 'supabase.co', 'localhost'].includes(apex);
+};
+
 Deno.serve(async req => {
   const id = correlationId();
   const url = new URL(req.url);
@@ -359,9 +404,43 @@ Deno.serve(async req => {
       );
     }
 
-    const expectedHost = new URL(handoff.origin).hostname.toLowerCase();
+    // The handoff exists so the tenant domain sets its own first-party cookie, so
+    // the redirect below always goes to the tenant origin. What arrives here can
+    // legitimately be the tenant itself, the central admin callback host, or a
+    // preview alias -- all of which resolve to the same site. Rejecting anything
+    // that was not byte-equal to the origin failed every login that came through
+    // a rewrite, because Vercel's external rewrite does not guarantee the
+    // original host in x-forwarded-host.
+    const { data: handoffDomain } = await admin
+      .from('site_domains')
+      .select('hostname, is_primary')
+      .eq('site_id', handoff.site_id)
+      .order('is_primary', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    const allowedHosts = siteHostnames(handoff.origin, handoffDomain);
     const requestHost = resolveRequestHostname(req, url);
-    if (requestHost !== expectedHost) {
+    const tenantHost = allowedHosts.has(requestHost);
+
+    if (!tenantHost && !isNonTenantHost(requestHost, allowedHosts)) {
+      // A genuine mismatch: an HTTP host on another operator's site presented
+      // this handoff. Record it, because otherwise the only trace is the redirect
+      // and the operator has to guess which host was seen.
+      await audit({
+        siteId: handoff.site_id,
+        organisationId: handoff.organisation_id,
+        actorType: 'trader',
+        action: 'trader.oauth.handoff_host_mismatch',
+        provider: 'deriv',
+        correlationId: id,
+        metadata: {
+          requestHost,
+          expectedHost: new URL(handoff.origin).hostname.toLowerCase(),
+          forwardedHost: req.headers.get('x-forwarded-host') || null,
+          requestUrlHost: url.hostname.toLowerCase(),
+        },
+      });
       return redirectWithError(handoff.origin, handoff.return_path, 'handoff_host_mismatch', id);
     }
 

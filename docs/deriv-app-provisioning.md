@@ -198,7 +198,41 @@ before issuing a code" with Deriv's own description attached, and not given an
 invented cause. The audit row and the transaction both keep the code and the
 description, so a later reading does not depend on this table being right.
 
+**It is also transient, not a verdict on the app.** The same application
+(`33MsUFUfuukH8nJjySUAA`, `platform_managed`) returned `request_forbidden` at
+14:12 and then completed logins at 14:15, 14:34 and 15:10 — `trader.oauth.completed`,
+token issued, session created. An earlier reading of this document called it the
+signature of an unverified app; that was wrong, and the copy no longer says it.
+A refusal is worth retrying, which is why the tenant notice treats it as
+actionable.
+
 `classifyAttempt` returns `accepted` / `denied` / `cancelled` for the Verify
 action. `cancelled` deliberately reports nothing about the redirect URI rather
 than counting as a rejection, because a visitor who closes the page produced no
 evidence either way.
+
+## The session handoff, and why it rejected valid logins
+
+The callback runs on whichever host Deriv redirects to — in practice the central
+`dsites-admin.vercel.app` callback. That host cannot set a cookie for a tenant
+domain, so the callback issues a 60-second single-use handoff and redirects to
+the tenant's own `/api/deriv-oauth-callback`, which sets the first-party cookie
+and redirects to the return path.
+
+The handoff terminator used to compare `x-forwarded-host` to the transaction
+origin with `!==`, and reject anything else with `handoff_host_mismatch`. That
+failed real logins: the tenant reaches the function through its own rewrite, and
+Vercel's external rewrite does not guarantee the original host survives in
+`x-forwarded-host`, so a login that had already succeeded — token issued, session
+row written, `trader.oauth.completed` in the audit log — was reported to the
+trader as a failure and its session discarded.
+
+The check now accepts any hostname belonging to the site (its origin, its
+`site_domains` hostname, and the `www`/bare pair) and does not treat a platform
+hop (`*.vercel.app`, `*.vercel.sh`, `*.supabase.co`, localhost) as a mismatch. A
+genuine mismatch — another operator's HTTP host presenting the handoff — is still
+refused, and now also writes `trader.oauth.handoff_host_mismatch` to the audit log
+with the host actually seen, because otherwise the only trace was the redirect.
+Notably `clinchyderiv1.vercel.app` *is* a `site_domains` hostname while
+`dtrader-254.vercel.app` is only a Vercel production alias, which is why the
+strict comparison failed for one tenant and not the other.
