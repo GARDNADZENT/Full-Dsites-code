@@ -366,6 +366,35 @@ export async function upsertPoolApp(input: {
   return invokeManagePlatformDeriv({ action: "upsert_pool_app", ...input });
 }
 
+/**
+ * Per-tenant app registration lives in its own Edge Function.
+ *
+ * `manage-platform-deriv` v1 is deployed and pinned, so the per-site registration
+ * logic ships separately rather than by rewriting that function.
+ */
+async function invokeManageSiteDerivApps<T>(body: Record<string, unknown>): Promise<T> {
+  const { data, error } = await supabase.functions.invoke("manage-site-deriv-apps", { body });
+
+  if (error) {
+    let message = error.message || "Request failed";
+    const ctx = "context" in error ? (error as { context?: unknown }).context : null;
+    if (ctx instanceof Response) {
+      const parsed = await ctx.json().catch(() => null);
+      if (typeof parsed?.error === "string") message = parsed.error;
+      else if (parsed?.error?.message) message = parsed.error.message;
+    }
+    throw new Error(message);
+  }
+
+  if (data?.error) {
+    const message =
+      typeof data.error === "string" ? data.error : data.error?.message || "Request failed";
+    throw new Error(message);
+  }
+
+  return data as T;
+}
+
 export type SiteDerivRegistration = {
   status: "registered" | "already_registered";
   app: {
@@ -395,12 +424,12 @@ export type BulkSiteDerivRegistration = {
 export async function registerSiteDerivApp(
   siteId: string,
 ): Promise<SiteDerivRegistration> {
-  return invokeManagePlatformDeriv({ action: "register_site_deriv_app", siteId });
+  return invokeManageSiteDerivApps({ action: "register_site_deriv_app", siteId });
 }
 
 /** Register every tenant site that does not have an app yet. */
 export async function registerAllSiteDerivApps(): Promise<BulkSiteDerivRegistration> {
-  return invokeManagePlatformDeriv({ action: "register_all_site_deriv_apps" });
+  return invokeManageSiteDerivApps({ action: "register_all_site_deriv_apps" });
 }
 
 /**
@@ -408,7 +437,7 @@ export async function registerAllSiteDerivApps(): Promise<BulkSiteDerivRegistrat
  * tenant another tenant's application.
  */
 export async function repairDerivAssignments(): Promise<{ repairedSites: number }> {
-  return invokeManagePlatformDeriv({ action: "repair_deriv_assignments" });
+  return invokeManageSiteDerivApps({ action: "repair_deriv_assignments" });
 }
 
 export async function importDerivApps(): Promise<{

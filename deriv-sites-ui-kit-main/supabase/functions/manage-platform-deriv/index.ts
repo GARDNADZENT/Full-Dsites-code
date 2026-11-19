@@ -105,54 +105,6 @@ const validateHttpsUrl = (value: unknown, fallback: string): string => {
   return parsed.toString();
 };
 
-/**
- * Every callback URL a tenant app should accept, most specific first.
- *
- * A tenant's own hostname is the primary callback, because that is the origin a
- * trader signs in from and what `site_deriv_apps.redirect_uri` records. The
- * central platform callback is kept as a fallback so a login started on the
- * admin host still completes.
- */
-const deriveCallbackUris = (primary: string, extras: Array<string | null | undefined>): string[] => {
-  const seen = new Set<string>();
-  const uris: string[] = [];
-  for (const candidate of [primary, ...extras]) {
-    if (typeof candidate !== "string" || !candidate.trim()) continue;
-    let parsed: URL;
-    try {
-      parsed = new URL(candidate.trim());
-    } catch {
-      continue;
-    }
-    if (parsed.protocol !== "https:") continue;
-    const normalized = parsed.toString();
-    if (seen.has(normalized)) continue;
-    seen.add(normalized);
-    uris.push(normalized);
-  }
-  return uris;
-};
-
-/**
- * Candidate Deriv app names for a tenant, in the order they will be attempted.
- *
- * app_register rejects duplicate names, rejects "deriv" anywhere in the name,
- * allows only [a-zA-Z0-9 _-], and caps the name at 48 characters. Each candidate
- * therefore stays inside that grammar and keeps the site tag so two similarly
- * named tenants can both be registered.
- */
-const nameCandidates = (base: string, tag: string): string[] => {
-  const clean = (value: string) =>
-    value.replace(/[^a-zA-Z0-9 _-]/g, " ").replace(/\s{2,}/g, " ").trim().slice(0, 48).trim();
-  const candidates = [
-    clean(base),
-    clean(`${base} app`),
-    clean(`${base} ${tag}`),
-    clean(`Site ${tag}`),
-  ];
-  return [...new Set(candidates.filter((value) => value.length >= 3))];
-};
-
 const maskLoginId = (loginId: string | null | undefined): string => {
   if (!loginId) return "Unknown";
   if (loginId.length <= 5) return `${loginId.slice(0, 2)}***`;
@@ -246,22 +198,14 @@ class DerivWsClient {
     email: string;
     userId: string;
     scopes: string[];
-    validUntil: string | null;
   }> {
     const res = await this.request({ authorize: token });
     const auth = (res.authorize || {}) as Record<string, unknown>;
-    // token_validity is reported in seconds remaining by the WebSocket API.
-    const validitySeconds = Number(auth.token_validity);
-    const validUntil =
-      Number.isFinite(validitySeconds) && validitySeconds > 0
-        ? new Date(Date.now() + validitySeconds * 1000).toISOString()
-        : null;
     return {
       loginid: String(auth.loginid || ""),
       email: String(auth.email || ""),
       userId: auth.user_id !== undefined ? String(auth.user_id) : "",
       scopes: Array.isArray(auth.scopes) ? auth.scopes.map(String) : [],
-      validUntil,
     };
   }
 
@@ -324,217 +268,6 @@ const auditLog = async (
     correlation_id: crypto.randomUUID(),
     metadata: input.metadata || {},
   });
-};
-
-type AdminClient = ReturnType<typeof supabaseAdmin>;
-
-type SiteRegistrationResult = {
-  status: number;
-  payload: Record<string, unknown>;
-};
-
-/**
- * Register one Deriv OAuth app for one tenant site and pin it to that site.
- *
- * The platform owner holds the DevHub account and pays each tenant their share
- * after the platform fee, so every tenant needs its own App ID, client ID and
- * callback: attribution is then one app to one site, which is what makes the
- * split auditable. The app is bound with `bind_platform_deriv_app_to_site` and is
- * deliberately never fed through `rebalance_platform_deriv_assignments`, which
- * could move the tenant's traffic onto somebody else's app.
- */
-const registerSiteDerivApp = async (input: {
-  admin: AdminClient;
-  userId: string;
-  siteId: string;
-}): Promise<SiteRegistrationResult> => {
-  const { admin, userId, siteId } = input;
-
-  const { data: site } = await admin
-    .from("sites")
-    .select("id, name, status, organisation_id, deriv_mode, requested_markup_rate, site_domains(hostname, status)")
-    .eq("id", siteId)
-    .maybeSingle();
-  if (!site) return { status: 404, payload: { error: "Site not found" } };
-  if (site.status === "deleted") return { status: 400, payload: { error: "Site is deleted" } };
-  if (site.deriv_mode === "custom") {
-    return {
-      status: 409,
-      payload: {
-        error:
-          "This site runs its own Deriv application; clear custom mode before registering a platform app",
-      },
-    };
-  }
-
-  // Re-registering would leave the tenant with two apps and split their markup.
-  const { data: existingBinding } = await admin
-    .from("site_deriv_apps")
-    .select("platform_deriv_app_id")
-    .eq("site_id", siteId)
-    .maybeSingle();
-  if (existingBinding?.platform_deriv_app_id) {
-    const { data: existingApp } = await admin
-      .from("platform_deriv_apps")
-      .select("id, name, app_id, oauth_client_id, callback_uri, markup_percentage")
-      .eq("id", existingBinding.platform_deriv_app_id)
-      .maybeSingle();
-    if (existingApp) {
-      return {
-        status: 200,
-        payload: {
-          status: "already_registered",
-          app: {
-            id: existingApp.id,
-            name: existingApp.name,
-            appId: existingApp.app_id,
-            oauthClientId: existingApp.oauth_client_id,
-            callbackUri: existingApp.callback_uri,
-            markupPercentage: Number(existingApp.markup_percentage),
-          },
-          site: { id: site.id, name: site.name },
-        },
-      };
-    }
-  }
-
-  const markupPercentage = clampMarkup(site.requested_markup_rate, 2.5);
-  const { cred, ws } = await getAuthorizedSuperuserClient(admin, true);
-
-  const liveHost = (
-    (site.site_domains as Array<{ hostname: string; status: string }> | null) || []
-  ).find((row) => row.status === "active" || row.status === "verified");
-  const siteCallback = liveHost ? `https://${liveHost.hostname}/api/deriv-oauth-callback` : null;
-  const callbacks = deriveCallbackUris(cred.default_callback_uri || DEFAULT_CALLBACK_URI, [siteCallback]);
-
-  const siteTag = siteId.replace(/-/g, "").slice(0, 6);
-  const baseName =
-    `${site.name || "Site"} ${siteTag}`.replace(/deriv/gi, "DSites").replace(/[^a-zA-Z0-9 _-]/g, "").trim() ||
-    `DSites ${siteTag}`;
-
-  const attemptedNames: string[] = [];
-  const attemptedCallbacks: string[] = [];
-  let registered: { appId: string; name: string; callbackUri: string } | null = null;
-
-  try {
-    for (const candidateName of nameCandidates(baseName, siteTag)) {
-      attemptedNames.push(candidateName);
-      for (const callbackUri of callbacks) {
-        attemptedCallbacks.push(callbackUri);
-        try {
-          const res = await ws.request({
-            app_register: 1,
-            name: candidateName,
-            scopes: ["read", "trade", "trading_information", "payments", "admin"],
-            redirect_uri: callbackUri,
-            verification_uri: cred.default_verification_uri || DEFAULT_VERIFICATION_URI,
-            homepage: cred.default_homepage_uri || DEFAULT_HOMEPAGE_URI,
-            app_markup_percentage: markupPercentage,
-          });
-          const reg = (res.app_register || {}) as Record<string, unknown>;
-          const appId = String(reg.app_id || "").trim();
-          if (!appId) throw new Error("Deriv did not return an app_id");
-          registered = { appId, name: candidateName, callbackUri };
-          break;
-        } catch (registerError) {
-          const message =
-            registerError instanceof Error ? registerError.message : "Failed to register app";
-          // Deriv reports duplicate names and unusable callback URLs here. Both are
-          // recoverable by trying the next candidate, so keep going; anything else
-          // is a real failure (auth, scope, outage) and must surface immediately.
-          if (!/name|redirect|callback|url|uri|invalid|exist/i.test(message)) throw registerError;
-        }
-      }
-      if (registered) break;
-    }
-  } finally {
-    ws.close();
-  }
-
-  if (!registered) {
-    await admin
-      .from("superuser_deriv_credentials")
-      .update({
-        last_error: `Deriv refused to register an app for ${site.name}`,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("singleton_key", "primary");
-    return {
-      status: 502,
-      payload: {
-        error: "Deriv did not register the application",
-        attemptedNames,
-        attemptedCallbacks,
-      },
-    };
-  }
-
-  const { data: savedApp, error: saveError } = await admin
-    .from("platform_deriv_apps")
-    .upsert(
-      {
-        name: registered.name,
-        app_id: registered.appId,
-        oauth_client_id: registered.appId,
-        callback_uri: registered.callbackUri,
-        environment: "production",
-        markup_percentage: markupPercentage,
-        configured_scopes: DEFAULT_OAUTH_SCOPES,
-        registration_source: "auto_registered",
-        is_default: false,
-        is_active: true,
-        notes: `Tenant app for site ${site.name} (${siteId})`,
-        created_by: userId,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "app_id,environment" },
-    )
-    .select("id, name, app_id, oauth_client_id, callback_uri, markup_percentage")
-    .single();
-  if (saveError) throw saveError;
-
-  const { error: bindError } = await admin.rpc("bind_platform_deriv_app_to_site", {
-    _site_id: siteId,
-    _platform_deriv_app_id: savedApp.id,
-    _markup_percentage: markupPercentage,
-    _scopes: DEFAULT_OAUTH_SCOPES,
-  });
-  if (bindError) throw bindError;
-
-  await auditLog(admin, {
-    userId,
-    actorType: "platform_admin",
-    action: "superuser.deriv_pool.site_app_registered",
-    siteId,
-    organisationId: site.organisation_id,
-    metadata: { appId: registered.appId, markupPercentage, callbackUri: registered.callbackUri },
-  });
-
-  return {
-    status: 200,
-    payload: {
-      status: "registered",
-      app: {
-        id: savedApp.id,
-        name: savedApp.name,
-        appId: savedApp.app_id,
-        oauthClientId: savedApp.oauth_client_id,
-        callbackUri: savedApp.callback_uri,
-        markupPercentage: Number(savedApp.markup_percentage),
-      },
-      site: { id: site.id, name: site.name },
-      // Deriv's app_register sets one redirect URL. Any further callback (the
-      // central one, or a hostname added later) has to be added in DevHub.
-      registrationWarnings:
-        callbacks.length > 1
-          ? [
-              `Registered callback: ${registered.callbackUri}. Add the remaining URL(s) to this app in DevHub: ${callbacks
-                .filter((uri) => uri !== registered.callbackUri)
-                .join(", ")}`,
-            ]
-          : [],
-    },
-  };
 };
 
 Deno.serve(async (req) => {
@@ -978,12 +711,6 @@ Deno.serve(async (req) => {
           defaultVerificationUri: cred?.default_verification_uri || DEFAULT_VERIFICATION_URI,
           defaultPlatformFeeRate: Number(cred?.default_platform_fee_rate ?? 17),
           lastVerifiedAt: cred?.last_verified_at || null,
-          tokenValidUntil: cred?.api_token_valid_until || null,
-          tokenDaysRemaining: cred?.api_token_valid_until
-            ? Math.floor(
-                (new Date(cred.api_token_valid_until).getTime() - Date.now()) / 86_400_000,
-              )
-            : null,
           lastSyncedAt: cred?.last_synced_at || null,
           lastError: cred?.last_error || null,
         },
@@ -1088,9 +815,6 @@ Deno.serve(async (req) => {
           patch.deriv_user_id = auth.userId || null;
           patch.last_verified_at = new Date().toISOString();
           patch.last_error = null;
-          // app.deriv.com caps tokens at 90 days; a silent expiry takes login down
-          // for every tenant at once, so keep the window visible.
-          patch.api_token_valid_until = auth.validUntil || null;
           verifiedAccount = { loginid: auth.loginid, email: auth.email, scopes: auth.scopes };
         } finally {
           ws.close();
@@ -1218,8 +942,8 @@ Deno.serve(async (req) => {
         .single();
       if (error) throw error;
 
-      // Deliberately no rebalance: each tenant is pinned to its own app, and a
-      // global re-assign would move tenants onto whichever app looks closest.
+      const { data: rebalanced } = await admin.rpc("rebalance_platform_deriv_assignments");
+
       await auditLog(admin, {
         userId: user.id,
         actorType: "platform_admin",
@@ -1229,13 +953,14 @@ Deno.serve(async (req) => {
           appId: savedApp.app_id,
           markupPercentage,
           syncedToDeriv,
+          rebalancedSites: rebalanced ?? 0,
         },
       });
 
       return json({
         app: savedApp,
         syncedToDeriv,
-        rebalancedSites: 0,
+        rebalancedSites: rebalanced ?? 0,
       });
     }
 
@@ -1306,103 +1031,119 @@ Deno.serve(async (req) => {
           .single();
         if (error) throw error;
 
-        // No rebalance: an unassigned app must not be pushed onto live tenants.
+        const { data: rebalanced } = await admin.rpc("rebalance_platform_deriv_assignments");
+
         await auditLog(admin, {
           userId: user.id,
           actorType: "platform_admin",
           action: "superuser.deriv_pool.auto_registered",
-          metadata: { appId: newAppId, markupPercentage },
+          metadata: { appId: newAppId, markupPercentage, rebalancedSites: rebalanced ?? 0 },
         });
 
-        return json({ app: saved, rebalancedSites: 0 });
+        return json({ app: saved, rebalancedSites: rebalanced ?? 0 });
       } finally {
         ws.close();
       }
     }
 
     // -----------------------------------------------------------------------
-    // Action: register_site_deriv_app (one Deriv app per tenant site)
+    // Action: auto_generate_tier_pool (One-click DForge 0%-3% Tier Pool)
     // -----------------------------------------------------------------------
-    if (action === "register_site_deriv_app") {
-      const siteId = String(body.siteId || "").trim();
-      if (!siteId) return json({ error: "Site ID is required" }, 400);
-      const result = await registerSiteDerivApp({ admin, userId: user.id, siteId });
-      return json(result.payload, result.status);
-    }
+    if (action === "auto_generate_tier_pool") {
+      const requestedTiers = Array.isArray(body.tiers) && body.tiers.length
+        ? [...new Set(body.tiers.map((t) => clampMarkup(t, 2.5)))]
+        : [0, 1, 1.5, 2, 2.5, 3];
 
-    // -----------------------------------------------------------------------
-    // Action: register_all_site_deriv_apps (register every eligible tenant site)
-    // -----------------------------------------------------------------------
-    if (action === "register_all_site_deriv_apps") {
-      const { data: cred } = await admin
-        .from("superuser_deriv_credentials")
-        .select("api_token_encrypted, api_token_scopes")
-        .eq("singleton_key", "primary")
-        .maybeSingle();
-      if (!cred?.api_token_encrypted) {
-        return json({ error: "Connect your Superuser Deriv API Token first" }, 409);
-      }
-      if (!Array.isArray(cred.api_token_scopes) || !cred.api_token_scopes.includes("admin")) {
-        return json({ error: "The connected Deriv token is missing the 'admin' scope" }, 409);
-      }
+      const { data: existingApps } = await admin
+        .from("platform_deriv_apps")
+        .select("markup_percentage")
+        .eq("environment", "production")
+        .eq("is_active", true);
 
-      const { data: sites } = await admin
-        .from("sites")
-        .select("id, name, status, deriv_mode")
-        .neq("status", "deleted")
-        .order("created_at", { ascending: true });
-      const { data: bindings } = await admin
-        .from("site_deriv_apps")
-        .select("site_id, platform_deriv_app_id");
-      const boundSites = new Set(
-        (bindings || []).filter((row) => Boolean(row.platform_deriv_app_id)).map((row) => row.site_id),
-      );
-      const pending = (sites || []).filter(
-        (row) => row.deriv_mode !== "custom" && !boundSites.has(row.id),
+      const existingSet = new Set(
+        (existingApps || []).map((a) => Number(a.markup_percentage).toFixed(2)),
       );
 
-      const registered: Array<{ siteId: string; siteName: string; appId: string }> = [];
-      const failed: Array<{ siteId: string; siteName: string; message: string }> = [];
+      const { cred, ws } = await getAuthorizedSuperuserClient(admin, true);
+      const callbackUri = cred.default_callback_uri || DEFAULT_CALLBACK_URI;
+      const created: Array<{ appId: string; markupPercentage: number; name: string }> = [];
+      const skipped: number[] = [];
+      const errors: Array<{ tier: number; message: string }> = [];
 
-      // Sequential on purpose: app_register is rate limited and a partial result is
-      // expected, so one tenant failing must not abort the rest.
-      for (const row of pending) {
-        const result = await registerSiteDerivApp({ admin, userId: user.id, siteId: row.id });
-        const app = (result.payload.app || {}) as Record<string, unknown>;
-        if (result.status === 200 && app.appId) {
-          registered.push({ siteId: row.id, siteName: row.name, appId: String(app.appId) });
-        } else {
-          failed.push({
-            siteId: row.id,
-            siteName: row.name,
-            message: String(result.payload.error || `Failed (${result.status})`),
-          });
+      try {
+        for (const tier of requestedTiers) {
+          if (existingSet.has(tier.toFixed(2))) {
+            skipped.push(tier);
+            continue;
+          }
+          const tierLabel = tier.toFixed(1).replace(/\.0$/, "");
+          const safeName = `DSites Pool ${tierLabel}pct`.slice(0, 48);
+          try {
+            const res = await ws.request({
+              app_register: 1,
+              name: safeName,
+              scopes: ["read", "trade", "trading_information", "payments", "admin"],
+              redirect_uri: callbackUri,
+              verification_uri: cred.default_verification_uri || DEFAULT_VERIFICATION_URI,
+              homepage: cred.default_homepage_uri || DEFAULT_HOMEPAGE_URI,
+              app_markup_percentage: tier,
+            });
+            const reg = (res.app_register || {}) as Record<string, unknown>;
+            const appId = String(reg.app_id || "").trim();
+            if (!appId) throw new Error("Missing app_id from Deriv");
+
+            const makeDefault = tier === 2.5;
+            if (makeDefault) {
+              await admin
+                .from("platform_deriv_apps")
+                .update({ is_default: false })
+                .eq("environment", "production")
+                .eq("is_default", true);
+            }
+
+            await admin.from("platform_deriv_apps").upsert(
+              {
+                name: `DSites Pool — ${tierLabel}% Markup`,
+                app_id: appId,
+                oauth_client_id: appId,
+                callback_uri: callbackUri,
+                environment: "production",
+                markup_percentage: tier,
+                configured_scopes: DEFAULT_OAUTH_SCOPES,
+                registration_source: "auto_registered",
+                is_default: makeDefault,
+                is_active: true,
+                created_by: user.id,
+                updated_at: new Date().toISOString(),
+              },
+              { onConflict: "app_id,environment" },
+            );
+            created.push({ appId, markupPercentage: tier, name: safeName });
+          } catch (tierErr) {
+            errors.push({
+              tier,
+              message: tierErr instanceof Error ? tierErr.message : "Failed to register tier",
+            });
+          }
         }
+      } finally {
+        ws.close();
       }
 
+      const { data: rebalanced } = await admin.rpc("rebalance_platform_deriv_assignments");
       await auditLog(admin, {
         userId: user.id,
         actorType: "platform_admin",
-        action: "superuser.deriv_pool.bulk_registered",
-        metadata: { registeredCount: registered.length, failedCount: failed.length },
+        action: "superuser.deriv_pool.tiers_generated",
+        metadata: { createdCount: created.length, skippedCount: skipped.length, errorCount: errors.length },
       });
 
-      return json({ registered, failed, skipped: boundSites.size });
-    }
-
-    // -----------------------------------------------------------------------
-    // Action: repair_deriv_assignments (undo assignments that override a binding)
-    // -----------------------------------------------------------------------
-    if (action === "repair_deriv_assignments") {
-      const { data: repaired, error } = await admin.rpc("repair_platform_deriv_assignments");
-      if (error) throw error;
-      await auditLog(admin, {
-        userId: user.id,
-        actorType: "platform_admin",
-        action: "superuser.deriv_pool.assignments_repaired",
-        metadata: { repairedSites: repaired ?? 0 },
+      return json({
+        created,
+        skipped,
+        errors,
+        rebalancedSites: rebalanced ?? 0,
       });
-      return json({ repairedSites: repaired ?? 0 });
     }
 
     // -----------------------------------------------------------------------
@@ -1447,14 +1188,15 @@ Deno.serve(async (req) => {
           if (!error) imported += 1;
         }
 
+        const { data: rebalanced } = await admin.rpc("rebalance_platform_deriv_assignments");
         await auditLog(admin, {
           userId: user.id,
           actorType: "platform_admin",
           action: "superuser.deriv_pool.imported",
-          metadata: { imported, totalFound: list.length },
+          metadata: { imported, totalFound: list.length, rebalancedSites: rebalanced ?? 0 },
         });
 
-        return json({ imported, totalFound: list.length, rebalancedSites: 0 });
+        return json({ imported, totalFound: list.length, rebalancedSites: rebalanced ?? 0 });
       } finally {
         ws.close();
       }
@@ -1470,10 +1212,7 @@ Deno.serve(async (req) => {
       const { error } = await admin.from("platform_deriv_apps").delete().eq("id", id);
       if (error) throw error;
 
-      // Repair, not rebalance: only sites whose binding still points at a live app
-      // are restored. Sites that genuinely lost their app stay unassigned instead
-      // of being handed another tenant's application.
-      const { data: rebalanced } = await admin.rpc("repair_platform_deriv_assignments");
+      const { data: rebalanced } = await admin.rpc("rebalance_platform_deriv_assignments");
       await auditLog(admin, {
         userId: user.id,
         actorType: "platform_admin",
