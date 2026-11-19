@@ -176,3 +176,29 @@ parameter, so a rejected login was indistinguishable from "not logged in".
 
 Partner attribution (`t`, `utm_source`, `utm_medium`, `utm_campaign`) is sent
 only on sign-up, and only one tracking-token alias is ever used.
+
+## Reading Deriv's answer correctly
+
+A refused login was being reported as a cancellation, which made a real failure
+look like the visitor closing the window. The callback received
+`error=request_forbidden` and returned `auth_error=login_cancelled`, because every
+Deriv error was mapped to the cancellation code unconditionally.
+
+The rule now applied, in both the callback and the admin preflight:
+
+| Deriv's `error` | Meaning | Reported as |
+| --- | --- | --- |
+| absent | authorization succeeded | the login proceeds |
+| `access_denied`, `user_cancelled`, `login_cancelled` | the visitor declined or closed the page | `login_cancelled` |
+| `invalid_grant`, `invalid_client` | the token endpoint was reached, so `redirect_uri` was never the objection | accepted |
+| anything else, including `request_forbidden`, `invalid_request` | Deriv refused the request before issuing a code | passed through verbatim |
+
+`request_forbidden` is not documented by Deriv, so it is reported as "refused
+before issuing a code" with Deriv's own description attached, and not given an
+invented cause. The audit row and the transaction both keep the code and the
+description, so a later reading does not depend on this table being right.
+
+`classifyAttempt` returns `accepted` / `denied` / `cancelled` for the Verify
+action. `cancelled` deliberately reports nothing about the redirect URI rather
+than counting as a rejection, because a visitor who closes the page produced no
+evidence either way.
