@@ -399,6 +399,13 @@ Deno.serve(async req => {
       return json(safeError('scope_not_configured', 'A requested feature needs a scope not configured for this application', id), 409, origin);
     }
 
+    // Deriv requires the token exchange to repeat the authorize request's
+    // redirect_uri byte for byte, and rejects the login with invalid_request /
+    // "does not match any of the OAuth 2.0 Client's pre-registered redirect urls"
+    // when it differs. Pinning it on the transaction means a later edit to the
+    // app row cannot invalidate a login that is already in flight.
+    const redirectUri = application.callback_uri;
+
     const state = randomSecret(32);
     const verifier = randomSecret(64);
     const challenge = await sha256(verifier);
@@ -410,6 +417,7 @@ Deno.serve(async req => {
       deriv_application_id: application.id,
       origin,
       return_path: returnPath,
+      redirect_uri: redirectUri,
       code_verifier_encrypted: await encryptSecret(verifier),
       requested_scopes: requested,
       expires_at: expiresAt,
@@ -419,7 +427,7 @@ Deno.serve(async req => {
     const url = new URL(DERIV_AUTHORIZATION_URL);
     url.searchParams.set('response_type', 'code');
     url.searchParams.set('client_id', application.oauth_client_id);
-    url.searchParams.set('redirect_uri', application.callback_uri);
+    url.searchParams.set('redirect_uri', redirectUri);
     url.searchParams.set('scope', requested.join(' '));
     url.searchParams.set('state', state);
     url.searchParams.set('code_challenge', challenge);

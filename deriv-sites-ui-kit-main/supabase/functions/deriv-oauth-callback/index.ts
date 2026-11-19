@@ -449,7 +449,8 @@ Deno.serve(async req => {
     const token = await exchangeAuthorizationCode({
       code,
       clientId: transaction.application.oauth_client_id,
-      redirectUri: transaction.application.callback_uri,
+      // Must match the authorize request exactly; the app row may have changed since.
+      redirectUri: transaction.redirect_uri || transaction.application.callback_uri,
       codeVerifier: await decryptSecret(transaction.code_verifier_encrypted),
       clientSecret,
     });
