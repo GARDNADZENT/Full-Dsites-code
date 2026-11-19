@@ -1,0 +1,51 @@
+name: deriv-egress-probe
+
+# Diagnostic, not product code. Answers one question:
+#   can any host outside Supabase Edge reach Deriv's WebSocket API?
+# app_register is WebSocket-only, so if WS is reachable the manual DevHub step
+# can be automated. Delete this workflow once the question is settled.
+
+on:
+  push:
+    branches:
+      - 'arena/**'
+    paths:
+      - 'scripts/deriv-egress-probe.mjs'
+      - '.github/workflows/deriv-egress-probe.yml'
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Can the runner reach Deriv's WebSocket API?
+        run: node scripts/deriv-egress-probe.mjs
+
+      - name: DNS and TCP context
+        if: always()
+        run: |
+          for h in ws.derivws.com ws.binaryws.com frontend.deriv.com api.derivws.com; do
+            echo "=== $h ==="
+            getent hosts "$h" || echo "no A record"
+            timeout 8 bash -c "cat < /dev/null > /dev/tcp/$h/443" && echo "tcp443 open" || echo "tcp443 failed"
+          done
+
+      - name: Is the Vercel probe endpoint publicly reachable?
+        if: always()
+        run: |
+          for url in \
+            "https://dsites-backend-kifjym82a-gardnadzents-projects.vercel.app/api/deriv-egress-probe?host=ws.derivws.com" \
+            "https://dsites-backend.vercel.app/api/deriv-egress-probe?host=ws.derivws.com"
+          do
+            echo "=== $url ==="
+            curl -sS -o /tmp/body.txt -w "HTTP=%{http_code}\n" "$url" || echo "curl failed"
+            head -c 600 /tmp/body.txt || true
+            echo
+          done
