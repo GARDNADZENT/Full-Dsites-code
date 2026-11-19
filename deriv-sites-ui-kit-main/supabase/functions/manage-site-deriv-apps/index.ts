@@ -270,6 +270,12 @@ const auditLog = async (
 /** Deriv REST base. Reachable from this network; the legacy WS hosts are not. */
 const DERIV_REST_BASE = "https://api.derivws.com";
 
+/**
+ * Deriv App IDs: current are alphanumeric OAuth 2.0 client IDs
+ * (e.g. 33MsUFUfuukH8nJjySUAA); legacy ones are numeric.
+ */
+const APP_ID_PATTERN = /^[A-Za-z0-9_-]{4,64}$/;
+
 type RestProbe = {
   reachable: boolean;
   status: number | null;
@@ -321,8 +327,21 @@ const verifyPatOverRest = async (token: string, derivAppId: string): Promise<Res
       return { reachable: true, status: res.status, detail: "Token accepted by Deriv", accounts };
     }
 
-    // 401/403 mean Deriv answered and rejected the token: actionable.
+    // 401/403 mean Deriv answered and rejected something: actionable.
     if (res.status === 401 || res.status === 403) {
+      const detail = text.slice(0, 200).replace(/\s+/g, "");
+      // "Invalid application" is about the App ID header, not the token. Say so,
+      // otherwise the operator re-issues a perfectly good token chasing it.
+      if (/invalid application/i.test(detail)) {
+        return {
+          reachable: true,
+          status: res.status,
+          detail:
+            `Deriv does not recognise the App ID "${derivAppId}" (HTTP ${res.status}). ` +
+            "The App ID must be the one that issued this token, from developers.deriv.com. " +
+            "A PAT needs a PAT-type app; an OAuth 2.0 app ID will not authorise a personal access token.",
+        };
+      }
       return {
         reachable: true,
         status: res.status,
@@ -704,23 +723,36 @@ Deno.serve(async (req) => {
       let appReachability: { reachable: boolean; detail: string } | null = null;
 
       if (rawToken) {
-        // PATs are rejected without Deriv-App-ID. The value can come from the
-        // form, or from ws_app_id saved earlier by the deployed function.
+        // PATs are rejected without Deriv-App-ID, and the header must carry the
+        // App ID that *issued* the token. Deriv's current App IDs are
+        // alphanumeric OAuth 2.0 client IDs (e.g. 33MsUFUfuukH8nJjySUAA), so an
+        // old digits-only check here silently threw them away and fell back to
+        // 1089 -- Deriv's shared public demo app, which answers 401
+        // "Invalid application" for any personal access token.
         const { data: existing } = await admin
           .from("superuser_deriv_credentials")
           .select("ws_app_id")
           .eq("singleton_key", "primary")
           .maybeSingle();
-        const derivAppId =
-          (typeof body.derivAppId === "string" && body.derivAppId.trim()) ||
-          (typeof body.wsAppId === "string" && /^\d{1,12}$/.test(body.wsAppId.trim()) ? body.wsAppId.trim() : "") ||
-          existing?.ws_app_id ||
-          "1089";
-        if (typeof body.wsAppId === "string" && /^\d{1,12}$/.test(body.wsAppId.trim())) {
-          patch.ws_app_id = body.wsAppId.trim();
-        }
+        const candidateAppId = [
+          typeof body.derivAppId === "string" ? body.derivAppId.trim() : "",
+          typeof body.wsAppId === "string" ? body.wsAppId.trim() : "",
+          String(existing?.ws_app_id || "").trim(),
+        ].find((value) => APP_ID_PATTERN.test(value));
 
-        verification = await verifyPatOverRest(rawToken, derivAppId);
+        if (!candidateAppId) {
+          return json(
+            {
+              error:
+                "A Deriv App ID is required to verify a personal access token. Copy it from developers.deriv.com and paste it into the App ID field.",
+              needsAppId: true,
+            },
+            400,
+          );
+        }
+        patch.ws_app_id = candidateAppId;
+
+        verification = await verifyPatOverRest(rawToken, candidateAppId);
         // A token Deriv rejects is not worth storing; a token that could not be
         // checked because the network failed is stored so the operator is not
         // blocked from making progress.

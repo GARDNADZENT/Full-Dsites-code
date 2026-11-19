@@ -48,7 +48,7 @@ const formatAmount = (value: number, currency = "USD") =>
 const AdminDerivAppPool = () => {
   const queryClient = useQueryClient();
   const [tokenInput, setTokenInput] = useState("");
-  const [wsAppId, setWsAppId] = useState("1089");
+  const [wsAppId, setWsAppId] = useState("");
   const [callbackUri, setCallbackUri] = useState("https://dsites-admin.vercel.app/api/deriv-oauth-callback");
   const [defaultFeeRate, setDefaultFeeRate] = useState(17);
   const [busy, setBusy] = useState<string | null>(null);
@@ -76,7 +76,7 @@ const AdminDerivAppPool = () => {
 
   useEffect(() => {
     if (!credential) return;
-    setWsAppId(credential.wsAppId || "1089");
+    setWsAppId(credential.wsAppId || "");
     setCallbackUri(credential.defaultCallbackUri);
     setDefaultFeeRate(credential.defaultPlatformFeeRate ?? 17);
   }, [credential]);
@@ -353,8 +353,15 @@ const AdminDerivAppPool = () => {
               />
               <div className="grid gap-3 sm:grid-cols-2">
                 <label className="space-y-1 text-xs text-muted-foreground">
-                  <span>WS app_id</span>
-                  <Input value={wsAppId} onChange={event => setWsAppId(event.target.value.replace(/[^0-9]/g, "").slice(0, 12))} placeholder="1089" />
+                  <span>Deriv App ID</span>
+                  <Input
+                    value={wsAppId}
+                    onChange={event => setWsAppId(event.target.value.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 64))}
+                    placeholder="e.g. 33MsUFUfuukH8nJjySUAA"
+                  />
+                  <span className="block text-[10px] text-muted-foreground">
+                    App ID from developers.deriv.com. Current IDs contain letters; legacy numeric IDs work too.
+                  </span>
                 </label>
                 <label className="space-y-1 text-xs text-muted-foreground">
                   <span>Default platform fee %</span>
