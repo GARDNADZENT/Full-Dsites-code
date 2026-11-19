@@ -1,6 +1,7 @@
 import { 
   Globe, 
   Link2, 
+  Rocket, 
   Bell, 
   Bot, 
   Headphones, 
@@ -29,6 +30,7 @@ const navItems: NavItem[] = [
   { icon: Globe, label: "Sites", path: "/" },
   { icon: Sparkles, label: "Dashboard", path: "/dashboard" },
   { icon: Link2, label: "Domains", path: "/domains" },
+  { icon: Rocket, label: "Deployments", path: "/deployments" },
   { icon: Bot, label: "XML Bots", path: "/xml-bots" },
   { icon: Code, label: "API Platforms", path: "/api-platforms" },
   { icon: Headphones, label: "Support", path: "/support" },
