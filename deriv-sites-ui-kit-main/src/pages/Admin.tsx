@@ -11,6 +11,7 @@ import { useAdminRole } from "@/hooks/useAdminRole";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import AdminMarkupStats from "@/components/AdminMarkupStats";
 import AdminDerivAppPool from "@/components/AdminDerivAppPool";
+import { AdminTenantDerivApps } from "@/components/AdminTenantDerivApps";
 interface XmlBot {
   id: string;
   file_name: string;
@@ -849,6 +850,7 @@ const Admin = () => {
 
         {isAdmin && <TabsContent value="deriv-pool">
           <AdminDerivAppPool />
+          <AdminTenantDerivApps />
         </TabsContent>}
       </Tabs>
     </div>

@@ -300,10 +300,20 @@ export const getDebugServiceWorker = () => {
     return false;
 };
 
-export const generateOAuthURL = async (_prompt?: string) => {
+/**
+ * Build the Deriv authorization URL for this site.
+ *
+ * `prompt` is passed through to Deriv: `registration` shows the signup form
+ * instead of login. Deriv's OAuth guide is explicit that the login form is shown
+ * unless `prompt=registration` is sent, so the header's "Sign up" button depends
+ * on this value surviving all the way to the authorize request.
+ */
+export const generateOAuthURL = async (prompt?: 'login' | 'registration') => {
     try {
         const returnPath = `${window.location.pathname}${window.location.hash}`;
-        return await DerivWSAccountsService.createAuthorizationURL(returnPath || '/');
+        return prompt
+            ? await DerivWSAccountsService.createAuthorizationURL(returnPath || '/', prompt)
+            : await DerivWSAccountsService.createAuthorizationURL(returnPath || '/');
     } catch (error) {
         console.error('Error generating OAuth URL:', error);
     }

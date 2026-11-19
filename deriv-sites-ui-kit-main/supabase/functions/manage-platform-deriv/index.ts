@@ -218,6 +218,27 @@ const auditLog = async (
   });
 };
 
+// ---------------------------------------------------------------------------
+// Redirect-URI preflight
+//
+// Deriv's published OpenAPI spec has no endpoint that reads or writes a
+// registered redirect URI: the only /applications route is markup statistics,
+// and the word "redirect" does not appear in the spec at all. So the platform
+// cannot inspect the registration -- but it can prove a URI is accepted.
+//
+// A real signed-in trader completing the authorization flow is the only
+// conclusive test, because Deriv validates the redirect URI after sign-in. The
+// callback records the outcome of that validation on the transaction
+// (deriv_oauth_transactions.deriv_error_code), which this reads.
+// ---------------------------------------------------------------------------
+const exchangeSucceeded = (code: string | null): boolean => {
+  // Deriv's token endpoint answers invalid_grant for an unknown/expired code --
+  // a code it reached past redirect-URI validation to look up. invalid_request
+  // is the redirect-URI rejection.
+  if (!code) return false;
+  return code !== 'invalid_request';
+};
+
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: corsHeaders });
@@ -535,7 +556,7 @@ Deno.serve(async (req) => {
           .order("is_primary", { ascending: false }),
         admin
           .from("deriv_applications")
-          .select("site_id, app_id, oauth_client_id, markup_rate, source_type, verification_status"),
+          .select("site_id, app_id, oauth_client_id, callback_uri, markup_rate, source_type, verification_status"),
         admin.from("site_trader_attributions").select("site_id, account_type"),
         admin
           .from("site_commission_ledger")
@@ -697,6 +718,7 @@ Deno.serve(async (req) => {
               ? Number(da.markup_rate)
               : null,
             assignedAppId: da?.app_id || null,
+            callbackUri: da?.callback_uri || null,
             platformFeeRate: Number(s.platform_fee_rate ?? 17),
             realTraders: tc.real,
             demoTraders: tc.demo,
@@ -1031,6 +1053,140 @@ Deno.serve(async (req) => {
         },
         503,
       );
+    }
+
+    // -----------------------------------------------------------------------
+    // Action: update_deriv_application_callback
+    //
+    // Deriv rejects a login whose redirect_uri is not registered on the OAuth
+    // 2.0 client, with "does not match any of the OAuth 2.0 Client's
+    // pre-registered redirect urls". The platform controls the value it sends,
+    // so it can be corrected here instead of in DevHub -- which matters because
+    // the registered URI may already be the tenant origin (trader logins go
+    // through the tenant's own /api/deriv-oauth-callback rewrite).
+    //
+    // Written in all three places the flow reads it from, so a later rebind
+    // cannot restore the stale value.
+    // -----------------------------------------------------------------------
+    if (action === "update_deriv_application_callback") {
+      const siteId = String(body.siteId || "").trim();
+      if (!siteId) return json({ error: "siteId is required" }, 400);
+      const callbackUri = validateHttpsUrl(body.callbackUri, DEFAULT_CALLBACK_URI);
+
+      const { data: application, error: readError } = await admin
+        .from("deriv_applications")
+        .select("id, app_id, callback_uri, platform_deriv_app_id")
+        .eq("site_id", siteId)
+        .maybeSingle();
+      if (readError) throw readError;
+      if (!application) {
+        return json(
+          { error: "This site has no Deriv application assigned yet. Add one under Pool apps first." },
+          404,
+        );
+      }
+
+      const unchanged = application.callback_uri === callbackUri;
+      const nowIso = new Date().toISOString();
+
+      if (!unchanged) {
+        const { error } = await admin
+          .from("deriv_applications")
+          .update({ callback_uri: callbackUri, updated_at: nowIso })
+          .eq("id", application.id);
+        if (error) throw error;
+      }
+
+      // site_deriv_apps mirrors the value for the admin/site views.
+      await admin.from("site_deriv_apps").update({ redirect_uri: callbackUri }).eq("site_id", siteId);
+
+      if (application.platform_deriv_app_id) {
+        await admin
+          .from("platform_deriv_apps")
+          .update({ callback_uri: callbackUri, updated_at: nowIso })
+          .eq("id", application.platform_deriv_app_id);
+      }
+
+      await auditLog(admin, {
+        userId: user.id,
+        actorType: "platform_admin",
+        action: "superuser.deriv_pool.callback_uri_updated",
+        siteId,
+        metadata: {
+          appId: application.app_id,
+          previousCallbackUri: application.callback_uri,
+          callbackUri,
+          unchanged,
+        },
+      });
+
+      return json({ callbackUri, callbackUpdated: !unchanged });
+    }
+
+    // -----------------------------------------------------------------------
+    // Action: check_deriv_application_callback
+    //
+    // Report whether the redirect URI we send is actually accepted by Deriv,
+    // using the outcome recorded by the callback on the last real login. This
+    // turns "login fails at Deriv" into an answer the operator can act on
+    // before a trader hits it.
+    // -----------------------------------------------------------------------
+    if (action === "check_deriv_application_callback") {
+      const siteId = String(body.siteId || "").trim();
+      if (!siteId) return json({ error: "siteId is required" }, 400);
+
+      const { data: application } = await admin
+        .from("deriv_applications")
+        .select("id, app_id, oauth_client_id, callback_uri")
+        .eq("site_id", siteId)
+        .maybeSingle();
+      if (!application) {
+        return json(
+          { error: "This site has no Deriv application assigned yet. Add one under Pool apps first." },
+          404,
+        );
+      }
+
+      const { data: attempt } = await admin
+        .from("deriv_oauth_transactions")
+        .select("id, redirect_uri, deriv_error_code, resolved_at, created_at, consumed_at")
+        .eq("site_id", siteId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .maybeSingle();
+
+      const registered = attempt ? exchangeSucceeded(attempt.deriv_error_code) : null;
+      const mismatch =
+        attempt && attempt.redirect_uri && attempt.redirect_uri !== application.callback_uri;
+
+      let status = "unverified";
+      let message =
+        "No completed login yet. Run a test login from the tenant site, then check again.";
+      if (registered === true) {
+        status = "registered";
+        message =
+          "Deriv accepted this redirect URI on the last login, so it is registered on the OAuth client.";
+      } else if (registered === false) {
+        status = "not_registered";
+        message =
+          "Deriv rejected this redirect URI on the last login. Register the exact URL in DevHub for the app below, or change the value here to match what DevHub already has.";
+      }
+
+      return json({
+        status,
+        message,
+        appId: application.app_id,
+        oauthClientId: application.oauth_client_id,
+        callbackUri: application.callback_uri,
+        lastAttempt: attempt
+          ? {
+              redirectUri: attempt.redirect_uri,
+              derivErrorCode: attempt.deriv_error_code,
+              at: attempt.created_at,
+              stale: Boolean(mismatch),
+            }
+          : null,
+      });
     }
 
     // -----------------------------------------------------------------------

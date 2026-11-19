@@ -54,10 +54,10 @@ export class DerivWSAccountsService {
         return this.getGateway().session();
     }
 
-    static async createAuthorizationURL(returnPath = '/'): Promise<string> {
+    static async createAuthorizationURL(returnPath = '/', prompt?: 'login' | 'registration'): Promise<string> {
         const runtime = getRuntimeSiteConfig();
         const scopes: DerivScope[] = runtime?.deriv.requiredScopes?.length ? runtime.deriv.requiredScopes : ['trade'];
-        const response = await this.getGateway().createAuthorization(scopes, returnPath);
+        const response = await this.getGateway().createAuthorization(scopes, returnPath, prompt);
         return response.authorizationUrl;
     }
 

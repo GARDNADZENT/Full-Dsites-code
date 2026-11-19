@@ -237,25 +237,15 @@ async function getValidAccessToken(record: {
   scopes: string[];
 }, application: { oauth_client_id: string }, table: 'encrypted_token_records' | 'owner_deriv_connections' = 'encrypted_token_records'): Promise<string> {
   if (Date.parse(record.expires_at) > Date.now() + 60_000) return decryptSecret(record.access_token_encrypted);
-  if (!record.refresh_token_encrypted) throw Object.assign(new Error('Deriv session expired'), { code: 'session_expired', status: 401 });
 
-  const refreshToken = await decryptSecret(record.refresh_token_encrypted);
-  const response = await fetch(DERIV_TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-    body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken, client_id: application.oauth_client_id }),
+  // Deriv issues no refresh token to third-party apps: the token response has no
+  // refresh_token field, and sending grant_type=refresh_token never returns one.
+  // Expired really does mean re-authorization, so this is reported as such rather
+  // than attempting an exchange that can only fail.
+  throw Object.assign(new Error('Deriv sign-in has expired, log in again'), {
+    code: 'session_expired',
+    status: 401,
   });
-  if (!response.ok) throw Object.assign(new Error('Deriv token refresh failed'), await parseError(response));
-  const token: TokenResponse = await response.json();
-  const expiresAt = new Date(Date.now() + (token.expires_in || 3600) * 1000).toISOString();
-  await supabaseAdmin().from(table).update({
-    access_token_encrypted: await encryptSecret(token.access_token),
-    refresh_token_encrypted: token.refresh_token ? await encryptSecret(token.refresh_token) : record.refresh_token_encrypted,
-    token_type: token.token_type || 'Bearer',
-    scopes: token.scope ? token.scope.split(/\s+/).filter(Boolean) : record.scopes,
-    expires_at: expiresAt,
-  }).eq('id', record.id);
-  return token.access_token;
 }
 
 async function derivRequest<T>(path: string, input: {
@@ -340,6 +330,9 @@ Deno.serve(async req => {
     const body = await req.json();
     const siteId = String(body.siteId || headerSiteId || '');
     const returnPath = typeof body.returnPath === 'string' && RETURN_PATH.test(body.returnPath) ? body.returnPath : '/';
+    // Deriv shows the login form unless prompt=registration is sent, so signup
+    // silently degraded to login. Only the documented value is accepted.
+    const prompt = body.prompt === 'registration' ? 'registration' : null;
     if (!siteId || siteId !== headerSiteId) return json(safeError('site_mismatch', 'Site identifier is invalid', id), 400, origin);
 
     const requested = Array.isArray(body.scopes) ? [...new Set(body.scopes.map(String))] : [];
@@ -399,6 +392,13 @@ Deno.serve(async req => {
       return json(safeError('scope_not_configured', 'A requested feature needs a scope not configured for this application', id), 409, origin);
     }
 
+    // Deriv requires the token exchange to repeat the authorize request's
+    // redirect_uri byte for byte, and rejects the login with invalid_request /
+    // "does not match any of the OAuth 2.0 Client's pre-registered redirect urls"
+    // when it differs. Pinning it on the transaction means a later edit to the
+    // app row cannot invalidate a login that is already in flight.
+    const redirectUri = application.callback_uri;
+
     const state = randomSecret(32);
     const verifier = randomSecret(64);
     const challenge = await sha256(verifier);
@@ -410,6 +410,7 @@ Deno.serve(async req => {
       deriv_application_id: application.id,
       origin,
       return_path: returnPath,
+      redirect_uri: redirectUri,
       code_verifier_encrypted: await encryptSecret(verifier),
       requested_scopes: requested,
       expires_at: expiresAt,
@@ -419,13 +420,24 @@ Deno.serve(async req => {
     const url = new URL(DERIV_AUTHORIZATION_URL);
     url.searchParams.set('response_type', 'code');
     url.searchParams.set('client_id', application.oauth_client_id);
-    url.searchParams.set('redirect_uri', application.callback_uri);
+    url.searchParams.set('redirect_uri', redirectUri);
     url.searchParams.set('scope', requested.join(' '));
     url.searchParams.set('state', state);
     url.searchParams.set('code_challenge', challenge);
     url.searchParams.set('code_challenge_method', 'S256');
+    if (prompt) url.searchParams.set('prompt', prompt);
+
+    // Partner attribution, documented for signup. `t` is one of the four
+    // equivalent tracking-token aliases (t, affiliate_token, sidi, ca) and only
+    // one may be sent. utm_* only accompany a signup, never a plain login.
     if (typeof site.deriv_affiliate_id === 'string' && /^[A-Za-z0-9_-]{3,64}$/.test(site.deriv_affiliate_id.trim())) {
-      url.searchParams.set('t', site.deriv_affiliate_id.trim());
+      const trackingToken = site.deriv_affiliate_id.trim();
+      url.searchParams.set('t', trackingToken);
+      if (prompt === 'registration') {
+        url.searchParams.set('utm_source', trackingToken);
+        url.searchParams.set('utm_medium', 'affiliate');
+        url.searchParams.set('utm_campaign', site.id.slice(0, 48));
+      }
     }
 
     await audit({ organisationId: site.organisation_id, siteId, actorType: 'trader', action: 'trader.oauth.started', provider: 'deriv', correlationId: id, metadata: { scopes: requested, sourceType: application.source_type || 'custom', appId: application.app_id } });

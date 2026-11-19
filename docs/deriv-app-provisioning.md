@@ -82,3 +82,59 @@ Per-site **attribution** never needed a per-tenant app: OAuth sign-up accepts
 `t` / `affiliate_token` / `sidi` / `ca` plus `utm_campaign`,
 `utm_medium=affiliate` and `utm_source`. That is stored in
 `sites.deriv_affiliate_id`.
+
+## Redirect URI: why it cannot be read or set through the API
+
+Confirmed against Deriv's own published spec, not inferred:
+
+- `schemas/rest-api-openapi.json` from
+  [deriv-com/deriv-api-schemas](https://github.com/deriv-com/deriv-api-schemas)
+  is the full third-party REST surface. The **only** `/applications` route is
+  `GET /applications/v1/markup-statistics`, which needs `application_read`.
+  There is no list, no get, no update.
+- The string `redirect` does not appear anywhere in that spec.
+
+So `application_read` ("read-only access to your registered applications")
+does not expose the registered redirect URI, and no API can change it. The
+registration lives only in the dashboard at `developers.deriv.com`, and **every
+URI that may be sent must be registered individually — subdirectories do not
+inherit**, per Deriv's OAuth guide:
+
+> If you have given a URL like https://abc.com but your redirect URL is
+> https://abc.com/callback, the flow will fail. Every subdirectory must be
+> registered separately.
+
+Deriv also validates `redirect_uri` only **after the user signs in**, which is
+why neither the authorize page nor the token endpoint can be probed for it:
+
+| probe | result |
+| --- | --- |
+| `GET /oauth2/auth` with valid / tenant / bogus URI | identical 246415-byte SPA shell |
+| `POST /oauth2/token` with a bogus code, any URI | `invalid_grant … not_found` — code is checked first |
+
+The one conclusive check is a real login, so the platform records the verdict
+instead of guessing:
+
+- `deriv-oauth-callback` writes Deriv's own `error` / `error_description` to
+  `deriv_oauth_transactions` (`deriv_error_code`, `deriv_error_message`,
+  `resolved_at`) — migration `20261119001000`.
+- The action `check_deriv_application_callback` reads the latest attempt back
+  and reports `registered` / `not_registered` / `unverified`, surfaced in the
+  Admin card "Tenant login callbacks" as a **Verify** button.
+- A `redirect_uri` rejection now returns `auth_error=redirect_uri_not_registered`
+  to the tenant instead of the generic `token_exchange_failed`.
+
+## Two behaviours the guide pins down, now implemented
+
+1. **Sign-up needs `prompt=registration`.** Without it Deriv shows the login
+   form. The tenant header's "Sign up" button already passed it, but the value
+   was dropped in `generateOAuthURL` and never reached the server;
+   `deriv-oauth-start` now forwards it (and ignores any other value).
+2. **There is no refresh token.** The token response has no `refresh_token`,
+   and `grant_type=refresh_token` never returns one. The trader session now
+   lasts exactly the access token's `expires_in`, and an expired token reports
+   `session_expired` so the client re-runs authorization, instead of attempting
+   an exchange that can only fail. (Seven copies of that dead branch removed.)
+
+Partner attribution (`t`, `utm_source`, `utm_medium`, `utm_campaign`) is sent
+only on sign-up, and only one tracking-token alias is ever used.

@@ -107,10 +107,14 @@ export class TraderGatewayClient {
         return body as T;
     }
 
-    async createAuthorization(scopes: DerivScope[], returnPath = '/'): Promise<{ authorizationUrl: string }> {
+    async createAuthorization(
+        scopes: DerivScope[],
+        returnPath = '/',
+        prompt?: 'login' | 'registration'
+    ): Promise<{ authorizationUrl: string }> {
         return this.request('/deriv-oauth-start', {
             method: 'POST',
-            body: JSON.stringify({ siteId: this.siteId, scopes, returnPath }),
+            body: JSON.stringify({ siteId: this.siteId, scopes, returnPath, ...(prompt ? { prompt } : {}) }),
         });
     }
 

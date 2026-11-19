@@ -237,25 +237,15 @@ async function getValidAccessToken(record: {
   scopes: string[];
 }, application: { oauth_client_id: string }, table: 'encrypted_token_records' | 'owner_deriv_connections' = 'encrypted_token_records'): Promise<string> {
   if (Date.parse(record.expires_at) > Date.now() + 60_000) return decryptSecret(record.access_token_encrypted);
-  if (!record.refresh_token_encrypted) throw Object.assign(new Error('Deriv session expired'), { code: 'session_expired', status: 401 });
 
-  const refreshToken = await decryptSecret(record.refresh_token_encrypted);
-  const response = await fetch(DERIV_TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-    body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken, client_id: application.oauth_client_id }),
+  // Deriv issues no refresh token to third-party apps: the token response has no
+  // refresh_token field, and sending grant_type=refresh_token never returns one.
+  // Expired really does mean re-authorization, so this is reported as such rather
+  // than attempting an exchange that can only fail.
+  throw Object.assign(new Error('Deriv sign-in has expired, log in again'), {
+    code: 'session_expired',
+    status: 401,
   });
-  if (!response.ok) throw Object.assign(new Error('Deriv token refresh failed'), await parseError(response));
-  const token: TokenResponse = await response.json();
-  const expiresAt = new Date(Date.now() + (token.expires_in || 3600) * 1000).toISOString();
-  await supabaseAdmin().from(table).update({
-    access_token_encrypted: await encryptSecret(token.access_token),
-    refresh_token_encrypted: token.refresh_token ? await encryptSecret(token.refresh_token) : record.refresh_token_encrypted,
-    token_type: token.token_type || 'Bearer',
-    scopes: token.scope ? token.scope.split(/\s+/).filter(Boolean) : record.scopes,
-    expires_at: expiresAt,
-  }).eq('id', record.id);
-  return token.access_token;
 }
 
 async function derivRequest<T>(path: string, input: {
@@ -352,6 +342,9 @@ Deno.serve(async req => {
     const configured = new Set(application.configured_scopes || []);
     if (requested.some(scope => !configured.has(scope))) return json(safeError('scope_not_configured', 'Enable the requested application scope in the wizard first', id), 409, origin);
 
+    // Pinned so the token exchange repeats exactly what was authorized.
+    const redirectUri = application.callback_uri;
+
     const state = randomSecret(32);
     const verifier = randomSecret(64);
     const expiresAt = new Date(Date.now() + 10 * 60_000).toISOString();
@@ -359,14 +352,15 @@ Deno.serve(async req => {
     const { error } = await admin.from('deriv_oauth_transactions').insert({
       state_hash: await sha256(state), organisation_id: site.organisation_id, site_id: siteId,
       deriv_application_id: application.id, actor_type: 'platform_owner', owner_user_id: auth.user.id,
-      origin, return_path: returnPath, code_verifier_encrypted: await encryptSecret(verifier),
+      origin, return_path: returnPath, redirect_uri: redirectUri,
+      code_verifier_encrypted: await encryptSecret(verifier),
       requested_scopes: requested, expires_at: expiresAt,
     });
     if (error) throw error;
     const oauthUrl = new URL(DERIV_AUTHORIZATION_URL);
     oauthUrl.searchParams.set('response_type', 'code');
     oauthUrl.searchParams.set('client_id', application.oauth_client_id);
-    oauthUrl.searchParams.set('redirect_uri', application.callback_uri);
+    oauthUrl.searchParams.set('redirect_uri', redirectUri);
     oauthUrl.searchParams.set('scope', requested.join(' '));
     oauthUrl.searchParams.set('state', state);
     oauthUrl.searchParams.set('code_challenge', await sha256(verifier));

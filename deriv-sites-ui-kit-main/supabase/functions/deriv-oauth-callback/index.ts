@@ -240,25 +240,15 @@ async function getValidAccessToken(record: {
   scopes: string[];
 }, application: { oauth_client_id: string }, table: 'encrypted_token_records' | 'owner_deriv_connections' = 'encrypted_token_records'): Promise<string> {
   if (Date.parse(record.expires_at) > Date.now() + 60_000) return decryptSecret(record.access_token_encrypted);
-  if (!record.refresh_token_encrypted) throw Object.assign(new Error('Deriv session expired'), { code: 'session_expired', status: 401 });
 
-  const refreshToken = await decryptSecret(record.refresh_token_encrypted);
-  const response = await fetch(DERIV_TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-    body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken, client_id: application.oauth_client_id }),
+  // Deriv issues no refresh token to third-party apps: the token response has no
+  // refresh_token field, and sending grant_type=refresh_token never returns one.
+  // Expired really does mean re-authorization, so this is reported as such rather
+  // than attempting an exchange that can only fail.
+  throw Object.assign(new Error('Deriv sign-in has expired, log in again'), {
+    code: 'session_expired',
+    status: 401,
   });
-  if (!response.ok) throw Object.assign(new Error('Deriv token refresh failed'), await parseError(response));
-  const token: TokenResponse = await response.json();
-  const expiresAt = new Date(Date.now() + (token.expires_in || 3600) * 1000).toISOString();
-  await supabaseAdmin().from(table).update({
-    access_token_encrypted: await encryptSecret(token.access_token),
-    refresh_token_encrypted: token.refresh_token ? await encryptSecret(token.refresh_token) : record.refresh_token_encrypted,
-    token_type: token.token_type || 'Bearer',
-    scopes: token.scope ? token.scope.split(/\s+/).filter(Boolean) : record.scopes,
-    expires_at: expiresAt,
-  }).eq('id', record.id);
-  return token.access_token;
 }
 
 async function derivRequest<T>(path: string, input: {
@@ -449,7 +439,8 @@ Deno.serve(async req => {
     const token = await exchangeAuthorizationCode({
       code,
       clientId: transaction.application.oauth_client_id,
-      redirectUri: transaction.application.callback_uri,
+      // Must match the authorize request exactly; the app row may have changed since.
+      redirectUri: transaction.redirect_uri || transaction.application.callback_uri,
       codeVerifier: await decryptSecret(transaction.code_verifier_encrypted),
       clientSecret,
     });
@@ -531,7 +522,10 @@ Deno.serve(async req => {
 
     const rawSession = randomSecret(48);
     const rawCsrf = randomSecret(32);
-    const sessionSeconds = token.refresh_token ? 7 * 24 * 60 * 60 : Math.max(60, token.expires_in || 3600);
+    // The trader session lasts exactly as long as the access token it wraps.
+    // There is no refresh token to outlive it, so a longer cookie would only keep
+    // a session that can no longer call Deriv.
+    const sessionSeconds = Math.max(60, token.expires_in || 3600);
     const sessionExpiresAt = new Date(Date.now() + sessionSeconds * 1000).toISOString();
     const { error: sessionError } = await admin.from('trader_sessions').insert({
       session_hash: await sha256(rawSession),
@@ -544,6 +538,13 @@ Deno.serve(async req => {
       expires_at: sessionExpiresAt,
     });
     if (sessionError) throw sessionError;
+
+    // Positive signal for the admin preflight: Deriv accepted the redirect URI
+    // and issued a token for it.
+    await admin
+      .from('deriv_oauth_transactions')
+      .update({ resolved_at: new Date().toISOString(), deriv_error_code: null })
+      .eq('id', transaction.id);
 
     await audit({ organisationId: transaction.organisation_id, siteId: transaction.site_id, actorType: 'trader', action: 'trader.oauth.completed', provider: 'deriv', correlationId: id, metadata: { scopes: grantedScopes, appId: transaction.application.app_id, sourceType: transaction.application.source_type || 'custom' } });
 
@@ -589,7 +590,40 @@ Deno.serve(async req => {
     });
   } catch (error) {
     console.error('deriv-oauth-callback failed', { correlationId: id, error });
-    await audit({ organisationId: transaction.organisation_id, siteId: transaction.site_id, actorUserId: transaction.owner_user_id, actorType: callbackActor, action: `${transaction.actor_type}.oauth.failed`, provider: 'deriv', correlationId: id });
-    return redirectWithError(transaction.origin, transaction.return_path, 'token_exchange_failed', id);
+
+    // Keep Deriv's own error code and message. A redirect-URI mismatch surfaces
+    // here as invalid_request with the reason in the description, and discarding
+    // it made every failure look identical to the operator and to the admin
+    // preflight, which reads this row to tell a registration problem apart from
+    // an expired code.
+    const derivError = error as { code?: string; message?: string };
+    const derivErrorCode = typeof derivError?.code === 'string' ? derivError.code : null;
+    const derivErrorMessage =
+      typeof derivError?.message === 'string' ? derivError.message.slice(0, 500) : null;
+    // Deriv's exact wording for the mismatch, per its OAuth troubleshooting guide:
+    // "The 'redirect_uri' parameter does not match any of the OAuth 2.0 Client's
+    // pre-registered redirect urls".
+    const redirectUriRejected =
+      derivErrorCode === 'invalid_request' &&
+      typeof derivErrorMessage === 'string' &&
+      /pre-?registered redirect url/i.test(derivErrorMessage);
+
+    await admin
+      .from('deriv_oauth_transactions')
+      .update({
+        deriv_error_code: derivErrorCode,
+        deriv_error_message: derivErrorMessage,
+        resolved_at: new Date().toISOString(),
+      })
+      .eq('id', transaction.id);
+
+    await audit({ organisationId: transaction.organisation_id, siteId: transaction.site_id, actorUserId: transaction.owner_user_id, actorType: callbackActor, action: `${transaction.actor_type}.oauth.failed`, provider: 'deriv', correlationId: id, metadata: { derivErrorCode, derivErrorMessage, redirectUri: transaction.redirect_uri } });
+
+    return redirectWithError(
+      transaction.origin,
+      transaction.return_path,
+      redirectUriRejected ? 'redirect_uri_not_registered' : 'token_exchange_failed',
+      id,
+    );
   }
 });
