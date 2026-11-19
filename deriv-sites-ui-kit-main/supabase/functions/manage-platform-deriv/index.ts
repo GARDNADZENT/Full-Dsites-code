@@ -653,7 +653,7 @@ Deno.serve(async (req) => {
           scopes,
           hasAdminScope: scopes.includes("admin"),
           hasReadScope: scopes.includes("read"),
-          wsAppId: cred?.ws_app_id || "1089",
+          wsAppId: cred?.ws_app_id || "",
           defaultCallbackUri: cred?.default_callback_uri || DEFAULT_CALLBACK_URI,
           defaultHomepageUri: cred?.default_homepage_uri || DEFAULT_HOMEPAGE_URI,
           defaultVerificationUri: cred?.default_verification_uri || DEFAULT_VERIFICATION_URI,
@@ -719,10 +719,13 @@ Deno.serve(async (req) => {
     if (action === "save_superuser_token") {
       const rawToken = typeof body.apiToken === "string" ? body.apiToken.trim() : "";
       const clearToken = body.clearToken === true;
-      const wsAppId =
-        typeof body.wsAppId === "string" && /^\d{1,12}$/.test(body.wsAppId.trim())
-          ? body.wsAppId.trim()
-          : "1089";
+      // App IDs are OAuth 2.0 client IDs and are alphanumeric. There is no
+      // numeric-only form any more, and no default: sending a made-up ID would
+      // make the REST check fail on the app header instead of the token.
+      const submittedAppId = typeof body.wsAppId === "string" ? body.wsAppId.trim() : "";
+      if (submittedAppId && !/^[A-Za-z0-9_-]{4,64}$/.test(submittedAppId)) {
+        return json({ error: "Deriv App ID must be 4-64 characters, letters and digits" }, 400);
+      }
       const defaultCallbackUri = validateHttpsUrl(body.defaultCallbackUri, DEFAULT_CALLBACK_URI);
       const defaultHomepageUri = validateHttpsUrl(body.defaultHomepageUri, DEFAULT_HOMEPAGE_URI);
       const defaultVerificationUri = validateHttpsUrl(
@@ -731,9 +734,18 @@ Deno.serve(async (req) => {
       );
       const defaultPlatformFeeRate = clampFeeRate(body.defaultPlatformFeeRate, 17);
 
+      // The App ID column is NOT NULL and scopes every REST call, so an existing
+      // value is reused rather than cleared when the field is left blank.
+      const { data: currentCredential } = await admin
+        .from("superuser_deriv_credentials")
+        .select("ws_app_id")
+        .eq("singleton_key", "primary")
+        .maybeSingle();
+      const storedAppId = String(currentCredential?.ws_app_id || "").trim();
+      const effectiveAppId = submittedAppId || storedAppId;
+
       const patch: Record<string, unknown> = {
         singleton_key: "primary",
-        ws_app_id: wsAppId,
         default_callback_uri: defaultCallbackUri,
         default_homepage_uri: defaultHomepageUri,
         default_verification_uri: defaultVerificationUri,
@@ -741,6 +753,7 @@ Deno.serve(async (req) => {
         updated_by: user.id,
         updated_at: new Date().toISOString(),
       };
+      if (effectiveAppId) patch.ws_app_id = effectiveAppId;
 
       let verifiedAccount: { loginid: string; email: string; scopes: string[] } | null = null;
 
@@ -755,7 +768,16 @@ Deno.serve(async (req) => {
         // Verify over the new platform's REST API. No WebSocket call is made
         // anywhere in this function: the legacy hosts are unreachable and the
         // legacy methods are gone from the codebase.
-        const verification = await verifyOperatorTokenOverRest(rawToken, wsAppId);
+        const appIdForCheck = effectiveAppId;
+        if (!appIdForCheck) {
+          return json(
+            {
+              error: "Deriv App ID is required to verify a token: the new platform identifies the app with a Deriv-App-ID header.",
+            },
+            400,
+          );
+        }
+        const verification = await verifyOperatorTokenOverRest(rawToken, appIdForCheck);
         if (!verification.reachable) {
           patch.api_token_encrypted = await encryptSecret(rawToken);
           patch.api_token_scopes = [];

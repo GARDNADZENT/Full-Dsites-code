@@ -313,7 +313,7 @@ const AdminDerivAppPool = () => {
             </div>
           ) : null}
 
-          {credential?.connected && !credential.hasAdminScope ? (
+          {credential?.connected ? (
             <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>
@@ -354,7 +354,7 @@ const AdminDerivAppPool = () => {
                     placeholder="e.g. 33MsUFUfuukH8nJjySUAA"
                   />
                   <span className="block text-[10px] text-muted-foreground">
-                    App ID from developers.deriv.com. Current IDs contain letters; legacy numeric IDs work too.
+                    OAuth 2.0 App ID from developers.deriv.com. IDs are alphanumeric; they are not numbers.
                   </span>
                 </label>
                 <label className="space-y-1 text-xs text-muted-foreground">

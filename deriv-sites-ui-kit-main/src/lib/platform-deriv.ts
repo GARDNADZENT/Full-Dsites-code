@@ -66,7 +66,6 @@ export type SuperuserDerivCredential = {
   loginId: string | null;
   email: string | null;
   scopes: string[];
-  hasAdminScope: boolean;
   hasReadScope: boolean;
   wsAppId: string;
   defaultCallbackUri: string;
