@@ -78,7 +78,7 @@ const VERIFY_REQUESTS = [
   },
   {
     host: 'fanrhtqyjajhacrmrbfv.supabase.co',
-    path: '/functions/v1/public-site-config?hostname=dtrader-vercel.vercel.app',
+    path: '/functions/v1/public-site-config?hostname=dtrader-254.vercel.app',
     note: 'dtrader public-site-config (expect deriv.appId)',
   },
 ];
