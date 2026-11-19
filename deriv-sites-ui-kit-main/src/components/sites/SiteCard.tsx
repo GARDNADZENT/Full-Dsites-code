@@ -4,10 +4,12 @@ import {
   ExternalLink,
   Globe,
   Pencil,
+  Rocket,
   Trash2,
   Check,
 } from "lucide-react";
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import { cn } from "@/lib/utils";
 import StatusPill from "@/components/sites/StatusPill";
@@ -79,6 +81,7 @@ const SiteCard = ({
   onEdit: () => void;
   onDelete: () => void;
 }) => {
+  const navigate = useNavigate();
   const integration = site.site_integrations?.[0] ?? null;
   const state = resolveOperationalState({
     siteStatus: site.status,
@@ -195,6 +198,14 @@ const SiteCard = ({
             View
           </button>
         )}
+        <button
+          type="button"
+          onClick={() => navigate(`/sites/${site.id}/deployments`)}
+          title="Deployment history"
+          className="inline-flex items-center justify-center rounded-lg border border-white/10 px-3 py-2 text-xs text-foreground hover:bg-white/5"
+        >
+          <Rocket className="h-3.5 w-3.5" />
+        </button>
         <button
           type="button"
           onClick={onDelete}

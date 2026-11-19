@@ -8,6 +8,8 @@ import ProtectedRoute from "@/components/ProtectedRoute";
 import Index from "./pages/Index";
 import Dashboard from "./pages/Dashboard";
 import Sites from "./pages/Sites";
+import Deployments from "./pages/Deployments";
+import SiteDeployments from "./pages/SiteDeployments";
 import Domains from "./pages/Domains";
 import PlatformUpdates from "./pages/PlatformUpdates";
 import XMLBots from "./pages/XMLBots";
@@ -48,6 +50,7 @@ const App = () => (
                         <Route path="/welcome" element={<Index />} />
                         <Route path="/dashboard" element={<Dashboard />} />
                         <Route path="/domains" element={<Domains />} />
+                        <Route path="/deployments" element={<Deployments />} />
                         <Route path="/platform-updates" element={<PlatformUpdates />} />
                         <Route path="/xml-bots" element={<XMLBots />} />
                         <Route path="/settings" element={<Settings />} />
@@ -56,6 +59,7 @@ const App = () => (
                         <Route path="/setup/*" element={<Navigate to="/domains" replace />} />
                         <Route path="/admin" element={<Admin />} />
                         <Route path="/sites/:siteId/config" element={<SiteRuntimeConfig />} />
+                        <Route path="/sites/:siteId/deployments" element={<SiteDeployments />} />
                         <Route path="/sites/:siteId/wizard" element={<SiteWizard />} />
                         <Route path="*" element={<NotFound />} />
                       </Routes>
