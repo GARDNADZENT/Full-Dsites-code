@@ -61,6 +61,8 @@ app.use('/api/best-bot-stats', require('./routes/best-bot-stats'));
 app.use('/api/scanner', require('./routes/scanner'));
 // Diagnostic only: reports whether this host can reach Deriv's WebSocket API.
 app.use('/api/deriv-egress-probe', require('./routes/deriv-egress-probe'));
+// Programmatic Deriv app registration (operator only, server-side token).
+app.use('/api/deriv-app-provisioning', require('./routes/deriv-app-provisioning'));
 
 // Error handling middleware
 app.use((err, req, res, next) => {

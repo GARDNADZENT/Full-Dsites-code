@@ -3,10 +3,9 @@ name: deriv-egress-probe
 # Diagnostic, not product code. Answers one question:
 #   can any host outside Supabase Edge reach Deriv's WebSocket API?
 # app_register is WebSocket-only, so if WS is reachable the manual DevHub step
-# can be automated. Results are posted as an issue because the runner's log
-# download is not reachable from every environment. Delete this workflow once
-# the question is settled. Issues are disabled on this repo, so the result is
-# posted as a commit comment instead, which the API serves without credentials.
+# can be automated. Issues are disabled on this repo, so results are posted as a
+# commit comment, which the API serves without credentials. Delete this
+# workflow once the question is settled.
 
 on:
   push:
@@ -14,6 +13,7 @@ on:
       - 'arena/**'
     paths:
       - 'scripts/deriv-egress-probe.mjs'
+      - 'scripts/deriv-egress-handshake.mjs'
       - '.github/workflows/deriv-egress-probe.yml'
   workflow_dispatch:
 
@@ -32,10 +32,16 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Can the runner reach Deriv's WebSocket API?
+      - name: Built-in WebSocket against every Deriv host
         run: node scripts/deriv-egress-probe.mjs | tee probe.txt
 
-      - name: DNS and TCP context
+      - name: Install the ws package for header control
+        run: npm install --no-save ws@8 | tee -a probe.txt
+
+      - name: HTTPS status plus handshake with browser headers
+        run: node scripts/deriv-egress-handshake.mjs | tee -a probe.txt
+
+      - name: DNS and raw TCP context
         if: always()
         run: |
           {
@@ -46,23 +52,9 @@ jobs:
               getent hosts "$h" || echo "no A record"
               timeout 8 bash -c "cat < /dev/null > /dev/tcp/$h/443" && echo "tcp443 open" || echo "tcp443 failed"
             done
-          } | tee -a probe.txt
-
-      - name: Is the Vercel probe endpoint publicly reachable?
-        if: always()
-        run: |
-          {
             echo ""
-            echo "### Vercel probe endpoint"
-            for url in \
-              "https://dsites-backend-kifjym82a-gardnadzents-projects.vercel.app/api/deriv-egress-probe?host=ws.derivws.com" \
-              "https://dsites-backend.vercel.app/api/deriv-egress-probe?host=ws.derivws.com"
-            do
-              echo "=== $url ==="
-              curl -sS -o /tmp/body.txt -w "HTTP=%{http_code}\n" "$url" || echo "curl failed"
-              head -c 800 /tmp/body.txt || true
-              echo
-            done
+            echo "### Derived WSS host used by the trading UI"
+            echo 'https://derivws.com/app_id/1089/l/EN' >/dev/null
           } | tee -a probe.txt
 
       - name: Publish result as a commit comment
