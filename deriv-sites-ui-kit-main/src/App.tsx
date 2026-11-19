@@ -10,6 +10,8 @@ import Dashboard from "./pages/Dashboard";
 import Sites from "./pages/Sites";
 import Deployments from "./pages/Deployments";
 import SiteDeployments from "./pages/SiteDeployments";
+import Commissions from "./pages/Commissions";
+import Payouts from "./pages/Payouts";
 import Domains from "./pages/Domains";
 import PlatformUpdates from "./pages/PlatformUpdates";
 import XMLBots from "./pages/XMLBots";
@@ -51,6 +53,8 @@ const App = () => (
                         <Route path="/dashboard" element={<Dashboard />} />
                         <Route path="/domains" element={<Domains />} />
                         <Route path="/deployments" element={<Deployments />} />
+                        <Route path="/commissions" element={<Commissions />} />
+                        <Route path="/payouts" element={<Payouts />} />
                         <Route path="/platform-updates" element={<PlatformUpdates />} />
                         <Route path="/xml-bots" element={<XMLBots />} />
                         <Route path="/settings" element={<Settings />} />
