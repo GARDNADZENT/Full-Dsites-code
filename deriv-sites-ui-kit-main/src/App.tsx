@@ -7,6 +7,7 @@ import { AuthProvider } from "@/contexts/AuthContext";
 import ProtectedRoute from "@/components/ProtectedRoute";
 import Index from "./pages/Index";
 import Dashboard from "./pages/Dashboard";
+import Sites from "./pages/Sites";
 import Domains from "./pages/Domains";
 import PlatformUpdates from "./pages/PlatformUpdates";
 import XMLBots from "./pages/XMLBots";
@@ -43,7 +44,8 @@ const App = () => (
                     <Sidebar />
                     <main className="flex-1 lg:ml-[260px] flex flex-col pt-14 lg:pt-0">
                       <Routes>
-                        <Route path="/" element={<Index />} />
+                        <Route path="/" element={<Sites />} />
+                        <Route path="/welcome" element={<Index />} />
                         <Route path="/dashboard" element={<Dashboard />} />
                         <Route path="/domains" element={<Domains />} />
                         <Route path="/platform-updates" element={<PlatformUpdates />} />

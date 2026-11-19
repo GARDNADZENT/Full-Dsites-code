@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Menu, Globe, Link2, Bell, Bot, Headphones, Settings, LogOut, LayoutGrid, Sparkles, BarChart3, Shield } from "lucide-react";
+import { Menu, Globe, Link2, Bell, Bot, Headphones, Settings, LogOut, LayoutGrid, Sparkles, Shield } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/contexts/AuthContext";
@@ -17,11 +17,11 @@ interface NavItem {
 
 const navItems: NavItem[] = [
   { icon: Globe, label: "Sites", path: "/" },
+  { icon: Sparkles, label: "Dashboard", path: "/dashboard" },
   { icon: Link2, label: "Domains", path: "/domains" },
   { icon: Bot, label: "XML Bots", path: "/xml-bots" },
   { icon: Headphones, label: "Support", path: "/support" },
   { icon: Settings, label: "Settings", path: "/settings" },
-  { icon: BarChart3, label: "Dashboard", path: "/dashboard" },
   { icon: Shield, label: "Admin", path: "/admin", adminOnly: true },
 ];
 

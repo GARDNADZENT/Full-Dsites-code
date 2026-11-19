@@ -20,6 +20,10 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { supabase } from "@/integrations/supabase/client";
+import ReadinessPanel from "@/components/sites/ReadinessPanel";
+import StatusPill from "@/components/sites/StatusPill";
+import { getSitePrimaryHostname } from "@/lib/domain-utils";
+import { resolveOperationalState } from "@/lib/site-status";
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
@@ -624,6 +628,15 @@ const SiteRuntimeConfig = () => {
   const derivNeedsAttention = derivMode === "custom" && !hasPublicDerivApp;
   const domainIsResolvable = domainForm.status === "active" || domainForm.status === "verified";
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const siteHostname = data?.site ? getSitePrimaryHostname(data as any) : null;
+  const operationalState = resolveOperationalState({
+    siteStatus: data?.site?.status,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    integration: (integration as any) ?? null,
+    hostname: siteHostname,
+  });
+
   if (isLoading) {
     return (
       <div className="flex-1 flex items-center justify-center">
@@ -656,14 +669,18 @@ const SiteRuntimeConfig = () => {
 
   return (
     <div className="flex-1 p-4 sm:p-6 lg:p-8 space-y-6">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-        <div>
+      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+        <div className="min-w-0">
           <Button variant="ghost" onClick={() => navigate(-1)} className="mb-2 -ml-3">
             <ArrowLeft className="w-4 h-4 mr-2" />
             Back
           </Button>
-          <h1 className="text-2xl font-semibold text-foreground">{data.site.name} Runtime Config</h1>
+          <div className="flex flex-wrap items-center gap-2">
+            <h1 className="text-2xl font-semibold text-foreground">{data.site.name}</h1>
+            <StatusPill state={operationalState} />
+          </div>
           <p className="text-sm text-muted-foreground">
+            {siteHostname ? `${siteHostname} · ` : ""}
             Manage branding, features, navigation, public Deriv settings, and publish snapshots.
           </p>
         </div>
@@ -691,6 +708,19 @@ const SiteRuntimeConfig = () => {
           </CardContent>
         </Card>
       </div>
+
+      <ReadinessPanel
+        input={{
+          siteId,
+          hostname: siteHostname,
+          domainVerified: Boolean(data?.domain?.is_verified),
+          configurationStatus: data?.site?.configuration_status ?? null,
+          publishedAt: lastPublished?.published_at ?? null,
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          integration: (integration as any) ?? null,
+          hasDerivApp: hasPublicDerivApp || Boolean(poolStatus?.defaultAppId),
+        }}
+      />
 
       <div className="grid gap-4 lg:grid-cols-3">
         {!domainForm.hostname || !domainIsResolvable ? (

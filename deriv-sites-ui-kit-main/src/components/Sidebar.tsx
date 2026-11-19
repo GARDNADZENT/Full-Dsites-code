@@ -8,7 +8,6 @@ import {
   LogOut,
   Sparkles,
   LayoutGrid,
-  BarChart3,
   Shield,
   Code
 } from "lucide-react";
@@ -28,12 +27,12 @@ interface NavItem {
 
 const navItems: NavItem[] = [
   { icon: Globe, label: "Sites", path: "/" },
+  { icon: Sparkles, label: "Dashboard", path: "/dashboard" },
   { icon: Link2, label: "Domains", path: "/domains" },
   { icon: Bot, label: "XML Bots", path: "/xml-bots" },
   { icon: Code, label: "API Platforms", path: "/api-platforms" },
   { icon: Headphones, label: "Support", path: "/support" },
   { icon: Settings, label: "Settings", path: "/settings" },
-  { icon: BarChart3, label: "Dashboard", path: "/dashboard" },
   { icon: Shield, label: "Admin", path: "/admin", adminOnly: true },
 ];
 
