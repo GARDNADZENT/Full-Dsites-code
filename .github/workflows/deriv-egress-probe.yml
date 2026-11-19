@@ -5,7 +5,8 @@ name: deriv-egress-probe
 # app_register is WebSocket-only, so if WS is reachable the manual DevHub step
 # can be automated. Results are posted as an issue because the runner's log
 # download is not reachable from every environment. Delete this workflow once
-# the question is settled.
+# the question is settled. Issues are disabled on this repo, so the result is
+# posted as a commit comment instead, which the API serves without credentials.
 
 on:
   push:
@@ -64,19 +65,24 @@ jobs:
             done
           } | tee -a probe.txt
 
-      - name: Publish result as an issue
+      - name: Publish result as a commit comment
         if: always()
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          {
-            echo "Run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
-            echo ""
-            echo '```'
-            cat probe.txt
-            echo '```'
-          } > body.md
-          gh issue create \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "deriv-egress-probe result ($(date -u +%Y-%m-%dT%H:%MZ))" \
-            --body-file body.md
+          node -e '
+            const fs = require("fs");
+            const body = [
+              "<!-- deriv-egress-probe -->",
+              "**Deriv WebSocket egress probe** (run " + process.env.GITHUB_RUN_ID + ")",
+              "",
+              "```",
+              fs.readFileSync("probe.txt", "utf8"),
+              "```",
+            ].join("\n");
+            fs.writeFileSync("comment.json", JSON.stringify({ body }));
+          '
+          gh api \
+            --method POST \
+            "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/comments" \
+            --input comment.json --jq '.html_url'
