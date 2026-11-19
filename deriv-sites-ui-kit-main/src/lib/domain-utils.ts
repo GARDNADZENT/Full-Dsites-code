@@ -695,8 +695,6 @@ export async function createDraftSite(options: {
         redirect_uri: callbackUri,
         deriv_mode: "platform_managed",
         markup_percentage: 2.5,
-        use_legacy_oauth_login: false,
-        include_legacy_app_id_in_oauth: false,
       },
       { onConflict: "site_id" },
     );

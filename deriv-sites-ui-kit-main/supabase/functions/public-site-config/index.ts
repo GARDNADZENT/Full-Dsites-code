@@ -393,7 +393,7 @@ Deno.serve(async req => {
         .order("sort_order", { ascending: true }),
       supabaseAdmin
         .from("site_deriv_apps")
-        .select("oauth_client_id, deriv_app_id, redirect_uri, use_legacy_oauth_login, include_legacy_app_id_in_oauth")
+        .select("oauth_client_id, deriv_app_id, redirect_uri")
         .eq("site_id", site.id)
         .maybeSingle(),
       supabaseAdmin

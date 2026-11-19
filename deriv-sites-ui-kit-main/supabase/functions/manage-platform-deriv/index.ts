@@ -6,7 +6,6 @@ const decoder = new TextDecoder();
 const DEFAULT_CALLBACK_URI = "https://dsites-admin.vercel.app/api/deriv-oauth-callback";
 const DEFAULT_HOMEPAGE_URI = "https://dsites-admin.vercel.app";
 const DEFAULT_VERIFICATION_URI = "https://dsites-admin.vercel.app/auth";
-const DEFAULT_DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3";
 const DEFAULT_OAUTH_SCOPES = ["trade", "account_manage", "application_read"];
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -111,140 +110,89 @@ const maskLoginId = (loginId: string | null | undefined): string => {
   return `${loginId.slice(0, 2)}***${loginId.slice(-3)}`;
 };
 
-class DerivWsClient {
-  private socket: WebSocket | null = null;
-  private reqId = 1;
-  private pending = new Map<
-    number,
-    { resolve: (value: Record<string, unknown>) => void; reject: (err: Error) => void; timer: number }
-  >();
+/** The scopes a new-platform (OAuth 2.0) Deriv app can hold. No admin scope exists. */
+const DERIV_OPERATOR_SCOPES = ["trade", "account_manage", "application_read", "payment"];
 
-  constructor(private readonly appId = "1089") {}
+const DERIV_REST_BASE = "https://api.derivws.com";
 
-  async connect(): Promise<void> {
-    if (this.socket && this.socket.readyState === WebSocket.OPEN) return;
-    const url = `${DEFAULT_DERIV_WS_URL}?app_id=${encodeURIComponent(this.appId || "1089")}`;
-    await new Promise<void>((resolve, reject) => {
-      const socket = new WebSocket(url);
-      const timer = setTimeout(() => {
-        try {
-          socket.close();
-        } catch {
-          // ignore
-        }
-        reject(new Error("Timed out connecting to Deriv WebSocket API"));
-      }, 12_000);
+/**
+ * Why app registration/update is unavailable, stated once.
+ *
+ * `app_register` and `app_update` belong to Deriv's legacy JSON-RPC stack and
+ * exist only on the legacy WebSocket hosts, which return Cloudflare 520 to
+ * server networks. The new platform has no equivalent: its reachable socket
+ * routes no app_* methods and the REST API has no /applications route.
+ *
+ * This is not a token-scope problem. The new OAuth 2.0 scope set -- trade,
+ * account_manage, application_read, payment -- has no admin scope; admin belongs
+ * to the legacy app model.
+ */
+const APP_REGISTRATION_REMOVED =
+  "Automatic Deriv app creation is unavailable: app_register exists only on Deriv's legacy WebSocket API (Cloudflare 520 to server networks) and the new platform has no applications API. Register the app at developers.deriv.com, then add it under Admin -> Deriv Pool -> Add app.";
 
-      socket.onopen = () => {
-        clearTimeout(timer);
-        this.socket = socket;
-        resolve();
-      };
+type OperatorTokenVerification = {
+  reachable: boolean;
+  status: number;
+  detail: string;
+  accounts: Array<{ accountId: string; accountType: string; currency: string }>;
+};
 
-      socket.onerror = () => {
-        clearTimeout(timer);
-        reject(new Error("Unable to reach Deriv WebSocket API"));
-      };
-
-      socket.onmessage = (event) => {
-        try {
-          const data = JSON.parse(String(event.data)) as Record<string, unknown>;
-          const id = Number(data.req_id);
-          const entry = this.pending.get(id);
-          if (!entry) return;
-          clearTimeout(entry.timer);
-          this.pending.delete(id);
-          if (data.error && typeof data.error === "object") {
-            const errObj = data.error as { message?: string; code?: string };
-            entry.reject(
-              new Error(errObj.message || errObj.code || "Deriv API returned an error"),
-            );
-          } else {
-            entry.resolve(data);
-          }
-        } catch {
-          // ignore malformed messages
-        }
-      };
-
-      socket.onclose = () => {
-        for (const [, entry] of this.pending.entries()) {
-          clearTimeout(entry.timer);
-          entry.reject(new Error("Deriv WebSocket connection closed unexpectedly"));
-        }
-        this.pending.clear();
-      };
+/**
+ * Verify an operator (or app owner) Deriv token against the new platform.
+ *
+ * This is the only verification available: `authorize` is a legacy WebSocket
+ * method, and the legacy hosts return Cloudflare 520 to server networks. The new
+ * platform authenticates with a Bearer token and identifies the app with a
+ * `Deriv-App-ID` header, so a successful account listing proves both the token
+ * and the app ID are accepted.
+ */
+const verifyOperatorTokenOverRest = async (
+  token: string,
+  appId: string,
+): Promise<OperatorTokenVerification> => {
+  const empty = { accounts: [] as OperatorTokenVerification["accounts"] };
+  let response: Response;
+  try {
+    response = await fetch(`${DERIV_REST_BASE}/trading/v1/options/accounts`, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Deriv-App-ID": appId,
+        Accept: "application/json",
+      },
     });
-  }
-
-  async request(payload: Record<string, unknown>, timeoutMs = 15_000): Promise<Record<string, unknown>> {
-    await this.connect();
-    if (!this.socket || this.socket.readyState !== WebSocket.OPEN) {
-      throw new Error("Deriv WebSocket is not open");
-    }
-    const id = this.reqId++;
-    return await new Promise<Record<string, unknown>>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error("Deriv API request timed out"));
-      }, timeoutMs);
-      this.pending.set(id, { resolve, reject, timer });
-      this.socket!.send(JSON.stringify({ ...payload, req_id: id }));
-    });
-  }
-
-  async authorize(token: string): Promise<{
-    loginid: string;
-    email: string;
-    userId: string;
-    scopes: string[];
-  }> {
-    const res = await this.request({ authorize: token });
-    const auth = (res.authorize || {}) as Record<string, unknown>;
+  } catch (error) {
     return {
-      loginid: String(auth.loginid || ""),
-      email: String(auth.email || ""),
-      userId: auth.user_id !== undefined ? String(auth.user_id) : "",
-      scopes: Array.isArray(auth.scopes) ? auth.scopes.map(String) : [],
+      reachable: false,
+      status: 0,
+      detail: `Could not reach ${DERIV_REST_BASE}: ${error instanceof Error ? error.message : String(error)}`,
+      ...empty,
     };
   }
 
-  close(): void {
-    try {
-      this.socket?.close();
-    } catch {
-      // ignore
-    }
-    this.socket = null;
-  }
-}
-
-const getAuthorizedSuperuserClient = async (
-  admin: ReturnType<typeof supabaseAdmin>,
-  requireAdminScope = false,
-) => {
-  const { data: cred } = await admin
-    .from("superuser_deriv_credentials")
-    .select("*")
-    .eq("singleton_key", "primary")
-    .maybeSingle();
-
-  if (!cred?.api_token_encrypted) {
-    throw new Error(
-      "Connect your Superuser Deriv API Token first (create one at app.deriv.com/account/api-token with Read + Admin scopes).",
-    );
+  const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!response.ok) {
+    const first = (body.errors as Array<{ code?: string; message?: string }> | undefined)?.[0];
+    return {
+      reachable: true,
+      status: response.status,
+      detail: first?.message || "Deriv rejected this token or app ID",
+      ...empty,
+    };
   }
 
-  const token = await decryptSecret(cred.api_token_encrypted);
-  const ws = new DerivWsClient(cred.ws_app_id || "1089");
-  const auth = await ws.authorize(token);
-  if (requireAdminScope && !auth.scopes.includes("admin")) {
-    ws.close();
-    throw new Error(
-      "Your connected Deriv API token does not include the 'admin' scope required to register or update Deriv applications.",
-    );
-  }
-  return { cred, ws, auth };
+  const rows = Array.isArray(body.data) ? (body.data as Array<Record<string, unknown>>) : [];
+  return {
+    reachable: true,
+    status: response.status,
+    detail: "Token accepted by Deriv",
+    accounts: rows
+      .map((row) => ({
+        accountId: String(row.account_id || ""),
+        accountType: row.account_type === "real" ? "real" : "demo",
+        currency: typeof row.currency === "string" ? row.currency : "",
+      }))
+      .filter((row) => row.accountId),
+  };
 };
 
 const auditLog = async (
@@ -570,7 +518,7 @@ Deno.serve(async (req) => {
         admin
           .from("platform_deriv_apps")
           .select(
-            "id, name, app_id, oauth_client_id, client_secret_encrypted, legacy_app_id, callback_uri, environment, markup_percentage, configured_scopes, registration_source, is_default, is_active, notes, created_at, updated_at",
+            "id, name, app_id, oauth_client_id, client_secret_encrypted, callback_uri, environment, markup_percentage, configured_scopes, registration_source, is_default, is_active, notes, created_at, updated_at",
           )
           .order("markup_percentage", { ascending: true })
           .order("created_at", { ascending: true }),
@@ -705,7 +653,7 @@ Deno.serve(async (req) => {
           scopes,
           hasAdminScope: scopes.includes("admin"),
           hasReadScope: scopes.includes("read"),
-          wsAppId: cred?.ws_app_id || "1089",
+          wsAppId: cred?.ws_app_id || "",
           defaultCallbackUri: cred?.default_callback_uri || DEFAULT_CALLBACK_URI,
           defaultHomepageUri: cred?.default_homepage_uri || DEFAULT_HOMEPAGE_URI,
           defaultVerificationUri: cred?.default_verification_uri || DEFAULT_VERIFICATION_URI,
@@ -720,7 +668,6 @@ Deno.serve(async (req) => {
           appId: app.app_id,
           oauthClientId: app.oauth_client_id,
           hasClientSecret: Boolean(app.client_secret_encrypted),
-          legacyAppId: app.legacy_app_id || null,
           callbackUri: app.callback_uri,
           environment: app.environment,
           markupPercentage: Number(app.markup_percentage),
@@ -772,10 +719,13 @@ Deno.serve(async (req) => {
     if (action === "save_superuser_token") {
       const rawToken = typeof body.apiToken === "string" ? body.apiToken.trim() : "";
       const clearToken = body.clearToken === true;
-      const wsAppId =
-        typeof body.wsAppId === "string" && /^\d{1,12}$/.test(body.wsAppId.trim())
-          ? body.wsAppId.trim()
-          : "1089";
+      // App IDs are OAuth 2.0 client IDs and are alphanumeric. There is no
+      // numeric-only form any more, and no default: sending a made-up ID would
+      // make the REST check fail on the app header instead of the token.
+      const submittedAppId = typeof body.wsAppId === "string" ? body.wsAppId.trim() : "";
+      if (submittedAppId && !/^[A-Za-z0-9_-]{4,64}$/.test(submittedAppId)) {
+        return json({ error: "Deriv App ID must be 4-64 characters, letters and digits" }, 400);
+      }
       const defaultCallbackUri = validateHttpsUrl(body.defaultCallbackUri, DEFAULT_CALLBACK_URI);
       const defaultHomepageUri = validateHttpsUrl(body.defaultHomepageUri, DEFAULT_HOMEPAGE_URI);
       const defaultVerificationUri = validateHttpsUrl(
@@ -784,9 +734,18 @@ Deno.serve(async (req) => {
       );
       const defaultPlatformFeeRate = clampFeeRate(body.defaultPlatformFeeRate, 17);
 
+      // The App ID column is NOT NULL and scopes every REST call, so an existing
+      // value is reused rather than cleared when the field is left blank.
+      const { data: currentCredential } = await admin
+        .from("superuser_deriv_credentials")
+        .select("ws_app_id")
+        .eq("singleton_key", "primary")
+        .maybeSingle();
+      const storedAppId = String(currentCredential?.ws_app_id || "").trim();
+      const effectiveAppId = submittedAppId || storedAppId;
+
       const patch: Record<string, unknown> = {
         singleton_key: "primary",
-        ws_app_id: wsAppId,
         default_callback_uri: defaultCallbackUri,
         default_homepage_uri: defaultHomepageUri,
         default_verification_uri: defaultVerificationUri,
@@ -794,6 +753,7 @@ Deno.serve(async (req) => {
         updated_by: user.id,
         updated_at: new Date().toISOString(),
       };
+      if (effectiveAppId) patch.ws_app_id = effectiveAppId;
 
       let verifiedAccount: { loginid: string; email: string; scopes: string[] } | null = null;
 
@@ -805,19 +765,43 @@ Deno.serve(async (req) => {
         patch.deriv_user_id = null;
         patch.last_error = null;
       } else if (rawToken) {
-        const ws = new DerivWsClient(wsAppId);
-        try {
-          const auth = await ws.authorize(rawToken);
+        // Verify over the new platform's REST API. No WebSocket call is made
+        // anywhere in this function: the legacy hosts are unreachable and the
+        // legacy methods are gone from the codebase.
+        const appIdForCheck = effectiveAppId;
+        if (!appIdForCheck) {
+          return json(
+            {
+              error: "Deriv App ID is required to verify a token: the new platform identifies the app with a Deriv-App-ID header.",
+            },
+            400,
+          );
+        }
+        const verification = await verifyOperatorTokenOverRest(rawToken, appIdForCheck);
+        if (!verification.reachable) {
           patch.api_token_encrypted = await encryptSecret(rawToken);
-          patch.api_token_scopes = auth.scopes;
-          patch.deriv_loginid = auth.loginid || null;
-          patch.deriv_email = auth.email || null;
-          patch.deriv_user_id = auth.userId || null;
+          patch.api_token_scopes = [];
+          patch.last_verified_at = null;
+          patch.last_error = verification.detail;
+        } else if (verification.status !== 200) {
+          // Deriv answered and rejected it: do not store a token that cannot work.
+          patch.api_token_encrypted = null;
+          patch.api_token_scopes = [];
+          patch.last_verified_at = null;
+          patch.last_error = verification.detail;
+        } else {
+          patch.api_token_encrypted = await encryptSecret(rawToken);
+          patch.api_token_scopes = DERIV_OPERATOR_SCOPES;
+          patch.deriv_loginid = verification.accounts[0]?.accountId || null;
+          patch.deriv_email = null;
+          patch.deriv_user_id = null;
           patch.last_verified_at = new Date().toISOString();
           patch.last_error = null;
-          verifiedAccount = { loginid: auth.loginid, email: auth.email, scopes: auth.scopes };
-        } finally {
-          ws.close();
+          verifiedAccount = {
+            loginid: verification.accounts[0]?.accountId || "",
+            email: "",
+            scopes: DERIV_OPERATOR_SCOPES,
+          };
         }
       }
 
@@ -865,10 +849,6 @@ Deno.serve(async (req) => {
       const environment = body.environment === "staging" ? "staging" : "production";
       const isDefault = body.isDefault === true;
       const isActive = body.isActive !== false;
-      const legacyAppId =
-        typeof body.legacyAppId === "string" && body.legacyAppId.trim()
-          ? body.legacyAppId.trim()
-          : null;
       const notes = typeof body.notes === "string" ? body.notes.trim() : null;
       const clientSecret =
         typeof body.clientSecret === "string" && body.clientSecret.trim()
@@ -881,25 +861,14 @@ Deno.serve(async (req) => {
 
       if (!appId) return json({ error: "v2 DevHub App ID is required" }, 400);
 
-      // Optional live sync of markup + callback URL to Deriv via app_update
-      let syncedToDeriv = false;
-      if (body.syncToDeriv === true && /^\d+$/.test(appId)) {
-        const { ws } = await getAuthorizedSuperuserClient(admin, true);
-        try {
-          await ws.request({
-            app_update: Number(appId),
-            name: name.slice(0, 48),
-            scopes: ["read", "trade", "trading_information", "payments", "admin"],
-            redirect_uri: callbackUri,
-            verification_uri: DEFAULT_VERIFICATION_URI,
-            homepage: DEFAULT_HOMEPAGE_URI,
-            app_markup_percentage: markupPercentage,
-          });
-          syncedToDeriv = true;
-        } finally {
-          ws.close();
-        }
-      }
+      // app_update is a legacy-only WebSocket method with no new-platform
+      // equivalent, so the app cannot be pushed to Deriv from here. The value is
+      // stored locally and the caller is told the sync did not happen.
+      const syncedToDeriv = false;
+      const syncWarning =
+        body.syncToDeriv === true
+          ? "Not pushed to Deriv: app_update exists only on the legacy WebSocket API. Edit the app's markup and redirect URI in the Deriv dashboard instead."
+          : null;
 
       if (isDefault) {
         await admin
@@ -913,7 +882,6 @@ Deno.serve(async (req) => {
         name: name.slice(0, 120),
         app_id: appId,
         oauth_client_id: oauthClientId,
-        legacy_app_id: legacyAppId,
         callback_uri: callbackUri,
         environment,
         markup_percentage: markupPercentage,
@@ -953,6 +921,7 @@ Deno.serve(async (req) => {
           appId: savedApp.app_id,
           markupPercentage,
           syncedToDeriv,
+          syncWarning,
           rebalancedSites: rebalanced ?? 0,
         },
       });
@@ -968,238 +937,55 @@ Deno.serve(async (req) => {
     // Action: auto_generate_app (Programmatically register Deriv App via API)
     // -----------------------------------------------------------------------
     if (action === "auto_generate_app") {
-      const markupPercentage = clampMarkup(body.markupPercentage, 2.5);
-      const isDefault = body.isDefault !== false;
-      const { cred, ws } = await getAuthorizedSuperuserClient(admin, true);
-      const callbackUri = validateHttpsUrl(
-        body.callbackUri,
-        cred.default_callback_uri || DEFAULT_CALLBACK_URI,
+      // app_register is a legacy-only WebSocket method. It has been removed along
+      // with the rest of the legacy stack, so this action cannot create an app.
+      return json(
+        {
+          error: "deriv_app_registration_unavailable",
+          message: APP_REGISTRATION_REMOVED,
+          legacyRemoved: true,
+          manualAlternative:
+            "Register the application at developers.deriv.com, then add its App ID with upsert_pool_app.",
+        },
+        503,
       );
-      const rawName =
-        (typeof body.name === "string" && body.name.trim()) ||
-        `DSites Trading ${markupPercentage}pct`;
-      // Deriv app_register forbids "deriv" in app names and caps length at 48 chars.
-      const safeDerivName = rawName
-        .replace(/deriv/gi, "DSites")
-        .replace(/[^a-zA-Z0-9 _-]/g, "")
-        .trim()
-        .slice(0, 48) || `DSites Hub ${markupPercentage}`;
-
-      try {
-        const res = await ws.request({
-          app_register: 1,
-          name: safeDerivName,
-          scopes: ["read", "trade", "trading_information", "payments", "admin"],
-          redirect_uri: callbackUri,
-          verification_uri: cred.default_verification_uri || DEFAULT_VERIFICATION_URI,
-          homepage: cred.default_homepage_uri || DEFAULT_HOMEPAGE_URI,
-          app_markup_percentage: markupPercentage,
-        });
-
-        const registered = (res.app_register || {}) as Record<string, unknown>;
-        const newAppId = String(registered.app_id || "").trim();
-        if (!newAppId) throw new Error("Deriv did not return an app_id");
-
-        if (isDefault) {
-          await admin
-            .from("platform_deriv_apps")
-            .update({ is_default: false })
-            .eq("environment", "production")
-            .eq("is_default", true);
-        }
-
-        const { data: saved, error } = await admin
-          .from("platform_deriv_apps")
-          .upsert(
-            {
-              name: safeDerivName,
-              app_id: newAppId,
-              oauth_client_id: newAppId,
-              callback_uri: callbackUri,
-              environment: "production",
-              markup_percentage: markupPercentage,
-              configured_scopes: DEFAULT_OAUTH_SCOPES,
-              registration_source: "auto_registered",
-              is_default: isDefault,
-              is_active: true,
-              created_by: user.id,
-              updated_at: new Date().toISOString(),
-            },
-            { onConflict: "app_id,environment" },
-          )
-          .select("id, name, app_id, oauth_client_id, callback_uri, markup_percentage, is_default")
-          .single();
-        if (error) throw error;
-
-        const { data: rebalanced } = await admin.rpc("rebalance_platform_deriv_assignments");
-
-        await auditLog(admin, {
-          userId: user.id,
-          actorType: "platform_admin",
-          action: "superuser.deriv_pool.auto_registered",
-          metadata: { appId: newAppId, markupPercentage, rebalancedSites: rebalanced ?? 0 },
-        });
-
-        return json({ app: saved, rebalancedSites: rebalanced ?? 0 });
-      } finally {
-        ws.close();
-      }
     }
 
     // -----------------------------------------------------------------------
     // Action: auto_generate_tier_pool (One-click DForge 0%-3% Tier Pool)
     // -----------------------------------------------------------------------
     if (action === "auto_generate_tier_pool") {
-      const requestedTiers = Array.isArray(body.tiers) && body.tiers.length
-        ? [...new Set(body.tiers.map((t) => clampMarkup(t, 2.5)))]
-        : [0, 1, 1.5, 2, 2.5, 3];
-
-      const { data: existingApps } = await admin
-        .from("platform_deriv_apps")
-        .select("markup_percentage")
-        .eq("environment", "production")
-        .eq("is_active", true);
-
-      const existingSet = new Set(
-        (existingApps || []).map((a) => Number(a.markup_percentage).toFixed(2)),
+      // The tier pool was built by registering one app per markup tier with
+      // app_register. That is legacy-only and has been removed, so no tier apps
+      // can be created here. Tiers are now expressed per site instead
+      // (sites.requested_markup_rate), not as separate Deriv apps.
+      return json(
+        {
+          error: "deriv_app_registration_unavailable",
+          message: APP_REGISTRATION_REMOVED,
+          legacyRemoved: true,
+          manualAlternative:
+            "Register each markup tier's application at developers.deriv.com and add them with upsert_pool_app. Tiers no longer need separate apps for billing: per-site markup is recorded per site.",
+        },
+        503,
       );
-
-      const { cred, ws } = await getAuthorizedSuperuserClient(admin, true);
-      const callbackUri = cred.default_callback_uri || DEFAULT_CALLBACK_URI;
-      const created: Array<{ appId: string; markupPercentage: number; name: string }> = [];
-      const skipped: number[] = [];
-      const errors: Array<{ tier: number; message: string }> = [];
-
-      try {
-        for (const tier of requestedTiers) {
-          if (existingSet.has(tier.toFixed(2))) {
-            skipped.push(tier);
-            continue;
-          }
-          const tierLabel = tier.toFixed(1).replace(/\.0$/, "");
-          const safeName = `DSites Pool ${tierLabel}pct`.slice(0, 48);
-          try {
-            const res = await ws.request({
-              app_register: 1,
-              name: safeName,
-              scopes: ["read", "trade", "trading_information", "payments", "admin"],
-              redirect_uri: callbackUri,
-              verification_uri: cred.default_verification_uri || DEFAULT_VERIFICATION_URI,
-              homepage: cred.default_homepage_uri || DEFAULT_HOMEPAGE_URI,
-              app_markup_percentage: tier,
-            });
-            const reg = (res.app_register || {}) as Record<string, unknown>;
-            const appId = String(reg.app_id || "").trim();
-            if (!appId) throw new Error("Missing app_id from Deriv");
-
-            const makeDefault = tier === 2.5;
-            if (makeDefault) {
-              await admin
-                .from("platform_deriv_apps")
-                .update({ is_default: false })
-                .eq("environment", "production")
-                .eq("is_default", true);
-            }
-
-            await admin.from("platform_deriv_apps").upsert(
-              {
-                name: `DSites Pool — ${tierLabel}% Markup`,
-                app_id: appId,
-                oauth_client_id: appId,
-                callback_uri: callbackUri,
-                environment: "production",
-                markup_percentage: tier,
-                configured_scopes: DEFAULT_OAUTH_SCOPES,
-                registration_source: "auto_registered",
-                is_default: makeDefault,
-                is_active: true,
-                created_by: user.id,
-                updated_at: new Date().toISOString(),
-              },
-              { onConflict: "app_id,environment" },
-            );
-            created.push({ appId, markupPercentage: tier, name: safeName });
-          } catch (tierErr) {
-            errors.push({
-              tier,
-              message: tierErr instanceof Error ? tierErr.message : "Failed to register tier",
-            });
-          }
-        }
-      } finally {
-        ws.close();
-      }
-
-      const { data: rebalanced } = await admin.rpc("rebalance_platform_deriv_assignments");
-      await auditLog(admin, {
-        userId: user.id,
-        actorType: "platform_admin",
-        action: "superuser.deriv_pool.tiers_generated",
-        metadata: { createdCount: created.length, skippedCount: skipped.length, errorCount: errors.length },
-      });
-
-      return json({
-        created,
-        skipped,
-        errors,
-        rebalancedSites: rebalanced ?? 0,
-      });
     }
 
-    // -----------------------------------------------------------------------
-    // Action: import_deriv_apps (Import existing Deriv apps owned by superuser)
-    // -----------------------------------------------------------------------
     if (action === "import_deriv_apps") {
-      const { cred, ws } = await getAuthorizedSuperuserClient(admin, false);
-      const fallbackCallback = cred.default_callback_uri || DEFAULT_CALLBACK_URI;
-      try {
-        const res = await ws.request({ app_list: 1 });
-        const list = Array.isArray(res.app_list)
-          ? (res.app_list as Array<Record<string, unknown>>)
-          : [];
-
-        let imported = 0;
-        for (const item of list) {
-          const appId = String(item.app_id || "").trim();
-          if (!appId) continue;
-          const name = String(item.name || `App ${appId}`).slice(0, 120);
-          const markup = clampMarkup(item.app_markup_percentage, 0);
-          const redirectUri =
-            typeof item.redirect_uri === "string" && item.redirect_uri.startsWith("https://")
-              ? item.redirect_uri
-              : fallbackCallback;
-
-          const { error } = await admin.from("platform_deriv_apps").upsert(
-            {
-              name,
-              app_id: appId,
-              oauth_client_id: appId,
-              callback_uri: redirectUri,
-              environment: "production",
-              markup_percentage: markup,
-              configured_scopes: DEFAULT_OAUTH_SCOPES,
-              registration_source: "imported",
-              is_active: true,
-              created_by: user.id,
-              updated_at: new Date().toISOString(),
-            },
-            { onConflict: "app_id,environment" },
-          );
-          if (!error) imported += 1;
-        }
-
-        const { data: rebalanced } = await admin.rpc("rebalance_platform_deriv_assignments");
-        await auditLog(admin, {
-          userId: user.id,
-          actorType: "platform_admin",
-          action: "superuser.deriv_pool.imported",
-          metadata: { imported, totalFound: list.length, rebalancedSites: rebalanced ?? 0 },
-        });
-
-        return json({ imported, totalFound: list.length, rebalancedSites: rebalanced ?? 0 });
-      } finally {
-        ws.close();
-      }
+      // Importing the account's apps used app_list, a legacy-only WebSocket
+      // method. The new platform's application_read scope cannot be used to
+      // fetch them either: it has no reachable endpoint (every /applications
+      // path returns 404). Apps are added explicitly with upsert_pool_app.
+      return json(
+        {
+          error: "deriv_app_list_unavailable",
+          message:
+            "Listing Deriv applications is unavailable: app_list exists only on the legacy WebSocket API, and the new platform exposes no applications endpoint. Add each app ID manually under Add app.",
+          legacyRemoved: true,
+          manualAlternative: "Add apps with upsert_pool_app.",
+        },
+        503,
+      );
     }
 
     // -----------------------------------------------------------------------
@@ -1227,201 +1013,24 @@ Deno.serve(async (req) => {
     // Action: sync_commissions (Pull Deriv app_markup_details & attribute per site!)
     // -----------------------------------------------------------------------
     if (action === "sync_commissions") {
-      const now = new Date();
-      const defaultFrom = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1))
-        .toISOString()
-        .slice(0, 10);
-      const defaultTo = now.toISOString().slice(0, 10);
-      const dateFrom =
-        typeof body.dateFrom === "string" && DATE_PATTERN.test(body.dateFrom)
-          ? body.dateFrom
-          : defaultFrom;
-      const dateTo =
-        typeof body.dateTo === "string" && DATE_PATTERN.test(body.dateTo)
-          ? body.dateTo
-          : defaultTo;
-
-      if (dateFrom > dateTo) {
-        return json({ error: "dateFrom must be on or before dateTo" }, 400);
-      }
-
-      const { data: poolApps } = await admin
-        .from("platform_deriv_apps")
-        .select("id, app_id, markup_percentage")
-        .eq("is_active", true);
-
-      if (!poolApps?.length) {
-        return json({ error: "Add or generate at least one Deriv App in the pool first." }, 409);
-      }
-
-      const [{ data: allAttributions }, { data: allSites }] = await Promise.all([
-        admin
-          .from("site_trader_attributions")
-          .select("site_id, organisation_id, deriv_app_id, deriv_loginid, first_seen_at, last_seen_at")
-          .order("last_seen_at", { ascending: false }),
-        admin.from("sites").select("id, organisation_id, platform_fee_rate"),
-      ]);
-
-      const siteMap = new Map((allSites || []).map((s) => [s.id, s]));
-      const attrByLogin = new Map<
-        string,
-        Array<{ site_id: string; organisation_id: string; deriv_app_id: string; last_seen_at: string }>
-      >();
-      for (const a of allAttributions || []) {
-        const key = a.deriv_loginid.toUpperCase();
-        const arr = attrByLogin.get(key) || [];
-        arr.push(a);
-        attrByLogin.set(key, arr);
-      }
-
-      const { cred, ws } = await getAuthorizedSuperuserClient(admin, false);
-      let processed = 0;
-      let attributed = 0;
-      let unattributed = 0;
-      const appErrors: Array<{ appId: string; message: string }> = [];
-
-      try {
-        for (const app of poolApps) {
-          if (!/^\d+$/.test(app.app_id)) continue;
-          try {
-            let offset = 0;
-            const limit = 500;
-            for (let page = 0; page < 10; page += 1) {
-              const res = await ws.request({
-                app_markup_details: 1,
-                app_id: Number(app.app_id),
-                date_from: `${dateFrom} 00:00:00`,
-                date_to: `${dateTo} 23:59:59`,
-                description: 1,
-                limit,
-                offset,
-              });
-              const details = (res.app_markup_details || {}) as {
-                transactions?: Array<Record<string, unknown>>;
-              };
-              const txns = Array.isArray(details.transactions) ? details.transactions : [];
-              if (!txns.length) break;
-
-              const upserts: Array<Record<string, unknown>> = [];
-              for (const tx of txns) {
-                const txId = String(
-                  tx.transaction_id || tx.contract_id || `${tx.transaction_time}-${offset}-${upserts.length}`,
-                );
-                const clientLogin = String(tx.client_loginid || "").toUpperCase();
-                const gross = Number(tx.app_markup_usd ?? tx.app_markup_value ?? tx.app_markup ?? 0);
-                const currency = String(
-                  tx.app_markup_usd !== undefined ? "USD" : tx.dev_currcode || tx.client_currcode || "USD",
-                );
-                const rawTime = tx.transaction_time;
-                const tradedAt =
-                  typeof rawTime === "number"
-                    ? new Date(rawTime * 1000).toISOString()
-                    : typeof rawTime === "string" && rawTime
-                      ? new Date(rawTime.replace(" ", "T") + (rawTime.endsWith("Z") ? "" : "Z")).toISOString()
-                      : new Date().toISOString();
-
-                const candidates = clientLogin ? attrByLogin.get(clientLogin) || [] : [];
-                const matched =
-                  candidates.find((c) => c.deriv_app_id === app.app_id) || candidates[0] || null;
-                const matchedSite = matched ? siteMap.get(matched.site_id) : null;
-
-                if (matched && matchedSite) {
-                  const feeRate = Number(
-                    matchedSite.platform_fee_rate ?? cred.default_platform_fee_rate ?? 17,
-                  );
-                  const superFee = Math.round(((gross * feeRate) / 100) * 1_000_000) / 1_000_000;
-                  const ownerNet = Math.round((gross - superFee) * 1_000_000) / 1_000_000;
-                  attributed += 1;
-                  upserts.push({
-                    external_transaction_id: txId,
-                    deriv_app_id: app.app_id,
-                    platform_deriv_app_id: app.id,
-                    site_id: matchedSite.id,
-                    organisation_id: matchedSite.organisation_id,
-                    client_loginid: clientLogin || null,
-                    contract_id: tx.contract_id ? String(tx.contract_id) : null,
-                    currency,
-                    gross_markup_amount: gross,
-                    applied_markup_rate: Number(app.markup_percentage),
-                    platform_fee_rate: feeRate,
-                    superuser_fee_amount: superFee,
-                    owner_net_amount: ownerNet,
-                    attribution_status: "attributed",
-                    traded_at: tradedAt,
-                    raw_payload: tx,
-                    synchronized_at: new Date().toISOString(),
-                  });
-                } else {
-                  unattributed += 1;
-                  upserts.push({
-                    external_transaction_id: txId,
-                    deriv_app_id: app.app_id,
-                    platform_deriv_app_id: app.id,
-                    site_id: null,
-                    organisation_id: null,
-                    client_loginid: clientLogin || null,
-                    contract_id: tx.contract_id ? String(tx.contract_id) : null,
-                    currency,
-                    gross_markup_amount: gross,
-                    applied_markup_rate: Number(app.markup_percentage),
-                    platform_fee_rate: 100,
-                    superuser_fee_amount: gross,
-                    owner_net_amount: 0,
-                    attribution_status: "unattributed",
-                    payout_status: "paid",
-                    traded_at: tradedAt,
-                    raw_payload: tx,
-                    synchronized_at: new Date().toISOString(),
-                  });
-                }
-              }
-
-              if (upserts.length) {
-                const { error: upsertErr } = await admin
-                  .from("site_commission_ledger")
-                  .upsert(upserts, { onConflict: "deriv_app_id,external_transaction_id" });
-                if (upsertErr) throw upsertErr;
-                processed += upserts.length;
-              }
-
-              if (txns.length < limit) break;
-              offset += limit;
-            }
-          } catch (appErr) {
-            appErrors.push({
-              appId: app.app_id,
-              message: appErr instanceof Error ? appErr.message : "Failed to fetch markup details",
-            });
-          }
-        }
-      } finally {
-        ws.close();
-      }
-
-      await admin
-        .from("superuser_deriv_credentials")
-        .update({
-          last_synced_at: new Date().toISOString(),
-          last_error: appErrors[0]?.message || null,
-        })
-        .eq("singleton_key", "primary");
-
-      await auditLog(admin, {
-        userId: user.id,
-        actorType: "platform_admin",
-        action: "superuser.commissions.synchronized",
-        metadata: { dateFrom, dateTo, processed, attributed, unattributed, errors: appErrors.length },
-      });
-
-      return json({
-        dateFrom,
-        dateTo,
-        processed,
-        attributed,
-        unattributed,
-        errors: appErrors,
-        synchronizedAt: new Date().toISOString(),
-      });
+      // Commission attribution used app_markup_details, a legacy-only WebSocket
+      // method. Beyond being unreachable, it is also unusable by design now: it
+      // reports markup per app_id, and the platform serves every site from one
+      // shared app, so the totals could not be split per site anyway.
+      //
+      // Per-site attribution does not depend on it. Trader-to-site attribution is
+      // recorded continuously by deriv-trader-accounts (site_trader_attributions)
+      // on the new platform, and per-site rates live on the sites row
+      // (requested_markup_rate, platform_fee_rate, deriv_affiliate_id).
+      return json(
+        {
+          error: "deriv_markup_reporting_unavailable",
+          message:
+            "Markup reporting is unavailable: app_markup_details exists only on the legacy WebSocket API. Per-site attribution is captured from trader account activity instead, and per-site rates are stored per site.",
+          legacyRemoved: true,
+        },
+        503,
+      );
     }
 
     // -----------------------------------------------------------------------

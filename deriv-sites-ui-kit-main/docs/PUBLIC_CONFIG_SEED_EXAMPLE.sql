@@ -80,17 +80,13 @@ INSERT INTO public.site_deriv_apps (
   site_id,
   oauth_client_id,
   deriv_app_id,
-  redirect_uri,
-  use_legacy_oauth_login,
-  include_legacy_app_id_in_oauth
+  redirect_uri
 )
 VALUES (
   '00000000-0000-0000-0000-000000000000',
   'safe-public-client-id',
-  '12345',
-  'https://local-staging-riskmanagers.site/',
-  false,
-  false
+  '34QHUg8pzhOtnNZ8B3YW2',
+  'https://local-staging-riskmanagers.site/'
 );
 
 INSERT INTO public.site_bots_manifest (

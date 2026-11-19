@@ -60,7 +60,6 @@ const AdminDerivAppPool = () => {
   const [newAppName, setNewAppName] = useState("");
   const [newAppMarkup, setNewAppMarkup] = useState(2.5);
   const [newAppSecret, setNewAppSecret] = useState("");
-  const [syncToDeriv, setSyncToDeriv] = useState(false);
 
   const statusQuery = useQuery({
     queryKey: ["superuser-deriv-status"],
@@ -130,11 +129,15 @@ const AdminDerivAppPool = () => {
       setTokenInput("");
 
       // The token can be stored and verified by Deriv while app registration is
-      // still impossible, because app_register lives on a host this network cannot
-      // reach. Say so plainly instead of implying everything works.
+      // still unavailable. Say why accurately, because the reason is easy to get
+      // wrong: it is NOT a missing `admin` scope. Current OAuth 2.0 apps use the
+      // trade / account_manage / application_read / payment scope set, which has
+      // no admin scope at all. app_register belongs to Deriv's legacy stack
+      // (legacy WebSocket only, no REST equivalent), and the legacy WebSocket
+      // hosts return Cloudflare 520 from server networks.
       if (result.appRegistration && !result.appRegistration.available) {
         toast.warning(
-          "Token saved. Automatic app creation is unavailable: Deriv's application API host is blocked from the platform network. Create each tenant's app at developers.deriv.com, then add it under Add app.",
+          "Token saved. Automatic app creation is unavailable: Deriv's application methods (app_register) exist only on the legacy WebSocket API, which server networks cannot reach. Register a new application at developers.deriv.com, then add it under Add app.",
           { duration: 12000 },
         );
       }
@@ -211,17 +214,9 @@ const AdminDerivAppPool = () => {
   const addManualApp = () =>
     run("manual", async () => {
       if (!newAppId.trim()) throw new Error("Deriv App ID is required");
-      // Deriv's app_update only accepts alphanumerics, spaces, underscores and hyphens (max 48),
-      // so the name is tightened whenever the change is pushed to Deriv.
-      const rawName = newAppName.trim() || `DSites Pool ${formatMarkupRate(newAppMarkup)} Markup`;
-      const safeName = syncToDeriv
-        ? rawName
-            .replace(/deriv/gi, "DSites")
-            .replace(/[^a-zA-Z0-9 _-]/g, "")
-            .replace(/\s{2,}/g, " ")
-            .trim()
-            .slice(0, 48) || `DSites Pool ${formatMarkupRate(newAppMarkup)}`
-        : rawName;
+      // app_update is a legacy-only method, so nothing is pushed to Deriv here;
+      // the pool row is local and the App ID is the authoritative link.
+      const safeName = newAppName.trim() || `DSites Pool ${formatMarkupRate(newAppMarkup)} Markup`;
       const result = await upsertPoolApp({
         appId: newAppId.trim(),
         oauthClientId: newAppId.trim(),
@@ -230,12 +225,11 @@ const AdminDerivAppPool = () => {
         callbackUri,
         clientSecret: newAppSecret.trim() || undefined,
         isDefault: true,
-        syncToDeriv,
       });
       setNewAppId("");
       setNewAppName("");
       setNewAppSecret("");
-      return `Pool app ${result.app.appId} saved${result.syncedToDeriv ? " and synced to Deriv" : ""}`;
+      return `Pool app ${result.app.appId} saved`;
     });
 
   const syncLedger = () =>
@@ -261,7 +255,6 @@ const AdminDerivAppPool = () => {
         callbackUri: app.callbackUri,
         environment: app.environment,
         configuredScopes: app.configuredScopes,
-        legacyAppId: app.legacyAppId || undefined,
         notes: app.notes || undefined,
         isActive: !app.isActive,
         // The Edge Function clears competing defaults whenever isDefault is true.
@@ -320,13 +313,14 @@ const AdminDerivAppPool = () => {
             </div>
           ) : null}
 
-          {credential?.connected && !credential.hasAdminScope ? (
+          {credential?.connected ? (
             <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
               <span>
-                Automatic app creation is unavailable: Deriv's application API (app_register) lives on{" "}
-                <code className="font-mono">ws.derivws.com</code>, which this network cannot reach. Create each
-                tenant's app once at developers.deriv.com with the callback URL below, then add it under Add app.
+                Automatic app creation is unavailable: Deriv's <code className="font-mono">app_register</code> exists
+                only on the legacy WebSocket API, and the legacy hosts return Cloudflare 520 to server networks. Current
+                OAuth 2.0 apps also have no admin scope, so this is not something a token can grant. Register a new
+                application at developers.deriv.com with the callback URL below, then add it under Add app.
               </span>
             </div>
           ) : null}
@@ -348,7 +342,7 @@ const AdminDerivAppPool = () => {
                 type="password"
                 value={tokenInput}
                 onChange={event => setTokenInput(event.target.value)}
-                placeholder={credential?.connected ? "Replace existing CR… token (optional)" : "Paste a Deriv API token with admin scope"}
+                placeholder={credential?.connected ? "Replace existing Deriv token (optional)" : "Paste a Deriv API token"}
                 autoComplete="off"
               />
               <div className="grid gap-3 sm:grid-cols-2">
@@ -360,7 +354,7 @@ const AdminDerivAppPool = () => {
                     placeholder="e.g. 33MsUFUfuukH8nJjySUAA"
                   />
                   <span className="block text-[10px] text-muted-foreground">
-                    App ID from developers.deriv.com. Current IDs contain letters; legacy numeric IDs work too.
+                    OAuth 2.0 App ID from developers.deriv.com. IDs are alphanumeric; they are not numbers.
                   </span>
                 </label>
                 <label className="space-y-1 text-xs text-muted-foreground">
@@ -391,9 +385,7 @@ const AdminDerivAppPool = () => {
               </div>
               <p className="text-[11px] text-muted-foreground">
                 Scopes: {credential?.scopes?.length ? credential.scopes.join(", ") : "none yet"}.
-                {credential?.hasAdminScope
-                  ? " admin scope present."
-                  : " admin scope is required for app_register and can only be confirmed over Deriv's WebSocket API, which this network cannot reach — tick Admin for the token and it will be used as granted."}
+                {" "}Deriv OAuth 2.0 scopes are trade, account_manage, application_read and payment; there is no admin scope, and none of them can register applications.
               </p>
               {tokenExpiryWarning ? (
                 <p className={`text-[11px] ${tokenExpired ? "text-red-300" : "text-amber-300"}`}>
@@ -467,9 +459,10 @@ const AdminDerivAppPool = () => {
               placeholder="Client secret (optional, encrypted)"
               autoComplete="off"
             />
-            <div className="flex items-center justify-between rounded-md border border-white/10 bg-white/5 px-3 py-2">
-              <span className="text-xs text-muted-foreground">Push markup + callback to Deriv (app_update)</span>
-              <Switch checked={syncToDeriv} onCheckedChange={setSyncToDeriv} />
+            <div className="flex items-center rounded-md border border-white/10 bg-white/5 px-3 py-2">
+              <span className="text-xs text-muted-foreground">
+                Set markup and the callback URL on this app in the Deriv dashboard; the platform cannot push them.
+              </span>
             </div>
           </div>
 
@@ -499,7 +492,6 @@ const AdminDerivAppPool = () => {
                     </div>
                     <p className="mt-1 text-xs text-muted-foreground break-all">
                       App {app.appId} · OAuth {app.oauthClientId} · {app.registrationSource}
-                      {app.legacyAppId ? ` · legacy ${app.legacyAppId}` : ""}
                     </p>
                     <p className="text-xs text-muted-foreground">
                       <Users className="mr-1 inline h-3 w-3" />

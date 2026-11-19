@@ -123,8 +123,6 @@ const emptyDerivApp: SiteDerivAppInput = {
   oauth_client_id: "",
   deriv_app_id: "",
   redirect_uri: "",
-  use_legacy_oauth_login: false,
-  include_legacy_app_id_in_oauth: false,
 };
 
 const emptyDomain: SiteDomainInput = {
@@ -351,8 +349,6 @@ const SiteRuntimeConfig = () => {
       redirect_uri:
         data.derivApp?.redirect_uri ||
         (loadedMode === "platform_managed" ? CENTRAL_DERIV_CALLBACK_URL : ""),
-      use_legacy_oauth_login: data.derivApp?.use_legacy_oauth_login ?? false,
-      include_legacy_app_id_in_oauth: data.derivApp?.include_legacy_app_id_in_oauth ?? false,
     });
 
     setDomainForm({
@@ -1302,24 +1298,6 @@ const SiteRuntimeConfig = () => {
                     <Field label="Redirect URI">
                       <Input value={derivAppForm.redirect_uri || ""} onChange={e => setDerivAppForm(prev => ({ ...prev, redirect_uri: e.target.value }))} placeholder="https://example.com/api/deriv-oauth-callback" />
                     </Field>
-
-                    <div className="grid gap-3 md:grid-cols-2">
-                      <div className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 p-4">
-                        <div>
-                          <p className="text-sm font-medium text-foreground">Use legacy OAuth login</p>
-                          <p className="text-xs text-muted-foreground">Keeps compatibility with older login expectations.</p>
-                        </div>
-                        <Switch checked={derivAppForm.use_legacy_oauth_login ?? false} onCheckedChange={checked => setDerivAppForm(prev => ({ ...prev, use_legacy_oauth_login: checked }))} />
-                      </div>
-
-                      <div className="flex items-center justify-between rounded-lg border border-white/10 bg-white/5 p-4">
-                        <div>
-                          <p className="text-sm font-medium text-foreground">Include legacy app ID in OAuth</p>
-                          <p className="text-xs text-muted-foreground">Only use this if an existing frontend requires it.</p>
-                        </div>
-                        <Switch checked={derivAppForm.include_legacy_app_id_in_oauth ?? false} onCheckedChange={checked => setDerivAppForm(prev => ({ ...prev, include_legacy_app_id_in_oauth: checked }))} />
-                      </div>
-                    </div>
 
                     <div className="flex justify-end">
                       <Button onClick={() => derivMutation.mutate()} disabled={derivMutation.isPending}>
