@@ -124,6 +124,44 @@ instead of guessing:
 - A `redirect_uri` rejection now returns `auth_error=redirect_uri_not_registered`
   to the tenant instead of the generic `token_exchange_failed`.
 
+### A listed redirect URL is not automatically an accepted one
+
+Observed on the new developer portal's app editor (screenshot, 2026-11-19). The
+"Redirect URLs" card carries a **Pending** badge and a **Verify domains** action,
+and every entry has a status dot:
+
+| dot | entry |
+| --- | --- |
+| amber | `https://traderspulse.site/callback` |
+| amber | `https://www.traderspulse.site/callback` |
+| red | `https://tradepulse-lovat.vercel.app/` |
+| red | `https://dtrader-254.vercel.app/api/deriv-oauth-callback` |
+| red | `https://clinchyderiv1.vercel.app/api/deriv-oauth-callback` |
+| red | `https://dsites-admin.vercel.app/api/deriv-oauth-callback` |
+
+The three values we send are listed **byte for byte**, so the login failure is
+not a string mismatch: the app is *Pending* and those URLs are unverified. Adding
+a URL is therefore only half the step — each domain has to pass **Verify
+domains** before Deriv honours it, and until then the authorize request is
+rejected with the misleading `invalid_request … does not match any of the
+OAuth 2.0 Client's pre-registered redirect urls`.
+
+**These tenant hosts are a single-page app with a catch-all rewrite**, which rules
+out Deriv's "upload an HTML file" verification method: a request for
+`/anything.html` returns `index.html` (200, `text/html`, 4353 bytes), not a 404.
+The rewrite excludes only `/api/` and `/site.config.json`. So on `*.vercel.app`
+domains the workable method is DNS TXT, and that is impossible for a `vercel.app`
+subdomain because Vercel owns it — meaning verification needs a domain the
+operator actually controls. Also note `www` must be listed and verified
+separately: `www.traderspulse.site` is a distinct entry in the dashboard.
+
+Practical consequence for the platform: the operator cannot finish this from the
+admin app, so the tenant site now explains the failure instead of going quiet.
+`new-user-interface-main` reads `auth_error` from the callback redirect and shows
+a dismissible notice, with `redirect_uri_not_registered` worded as a site
+configuration problem rather than trader error. Nothing previously read that
+parameter, so a rejected login was indistinguishable from "not logged in".
+
 ## Two behaviours the guide pins down, now implemented
 
 1. **Sign-up needs `prompt=registration`.** Without it Deriv shows the login

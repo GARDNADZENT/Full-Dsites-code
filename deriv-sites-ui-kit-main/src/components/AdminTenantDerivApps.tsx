@@ -95,9 +95,13 @@ export function AdminTenantDerivApps() {
           Tenant login callbacks
         </CardTitle>
         <CardDescription>
-          Deriv only accepts a redirect URI registered on the OAuth 2.0 client. If a trader sees{" "}
-          <span className="font-mono text-[11px]">invalid_request</span> after signing in, this value and the
-          app at developers.deriv.com disagree — correct one to match the other, exactly.
+          Deriv only accepts a redirect URI registered on the OAuth 2.0 client, and on the new developer
+          portal a portal-listed URL still has to be <span className="font-semibold">verified</span> before
+          Deriv will honour it. So there are two separate failures: the URL is missing from the app, or it is
+          listed but unverified. A trader sees{" "}
+          <span className="font-mono text-[11px]">invalid_request</span> either way — which is why{" "}
+          <span className="font-semibold">Verify</span> reports Deriv&apos;s actual verdict rather than assuming
+          a mismatch.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-3">

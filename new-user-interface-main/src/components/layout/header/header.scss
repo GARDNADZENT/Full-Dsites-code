@@ -335,3 +335,51 @@
         transform: rotate(360deg);
     }
 }
+
+// Explains a failed Deriv login returned by the OAuth callback. Sits above the
+// header so it is the first thing seen on the page the trader returns to.
+.auth-error-notice {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    background-color: rgba(255, 68, 79, 0.12);
+    border-bottom: 1px solid rgba(255, 68, 79, 0.4);
+    color: var(--text-general, #ffffff);
+
+    &__content {
+        flex: 1 1 auto;
+        min-width: 0;
+    }
+
+    &__title {
+        margin: 0;
+        font-size: 0.875rem;
+        font-weight: 700;
+        line-height: 1.4;
+    }
+
+    &__detail {
+        margin: 0.125rem 0 0;
+        font-size: 0.8125rem;
+        line-height: 1.45;
+        opacity: 0.9;
+    }
+
+    &__dismiss {
+        flex: 0 0 auto;
+        border: 0;
+        background: none;
+        color: inherit;
+        font-size: 1.25rem;
+        line-height: 1;
+        padding: 0 0.25rem;
+        cursor: pointer;
+        opacity: 0.75;
+
+        &:hover,
+        &:focus-visible {
+            opacity: 1;
+        }
+    }
+}
