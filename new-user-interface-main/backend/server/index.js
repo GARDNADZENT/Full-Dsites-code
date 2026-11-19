@@ -59,6 +59,8 @@ if (process.env.VERCEL) {
 app.use('/api/bot-ideas', require('./routes/bot-ideas'));
 app.use('/api/best-bot-stats', require('./routes/best-bot-stats'));
 app.use('/api/scanner', require('./routes/scanner'));
+// Diagnostic only: reports whether this host can reach Deriv's WebSocket API.
+app.use('/api/deriv-egress-probe', require('./routes/deriv-egress-probe'));
 
 // Error handling middleware
 app.use((err, req, res, next) => {
