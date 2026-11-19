@@ -68,6 +68,72 @@ function sweep({ host, path }) {
   });
 }
 
+// Verification targets: prove the login chain now resolves an app for tenants.
+// These are read-only GETs against the platform's own public endpoints.
+const VERIFY_REQUESTS = [
+  {
+    host: 'fanrhtqyjajhacrmrbfv.supabase.co',
+    path: '/functions/v1/public-site-config?hostname=clinchyderiv1.vercel.app',
+    note: 'clinchy public-site-config (expect deriv.appId)',
+  },
+  {
+    host: 'fanrhtqyjajhacrmrbfv.supabase.co',
+    path: '/functions/v1/public-site-config?hostname=dtrader-vercel.vercel.app',
+    note: 'dtrader public-site-config (expect deriv.appId)',
+  },
+];
+
+async function checkSiteConfig({ host, path }) {
+  return new Promise(resolve => {
+    const started = Date.now();
+    const req = request(
+      { host, path, method: 'GET', timeout: TIMEOUT_MS, headers: { Accept: 'application/json' } },
+      res => {
+        let body = '';
+        res.on('data', chunk => {
+          body += chunk;
+          if (body.length > 8000) res.destroy();
+        });
+        res.on('end', () => {
+          let summary = null;
+          try {
+            const parsed = JSON.parse(body);
+            const deriv = parsed?.deriv || parsed?.config?.deriv || {};
+            summary = {
+              status: res.statusCode,
+              ms: Date.now() - started,
+              deriv: {
+                appId: deriv.appId ?? null,
+                oauthClientId: deriv.oauthClientId ?? null,
+                gatewayUrl: deriv.gatewayUrl ?? null,
+                managedByPlatform: deriv.managedByPlatform ?? null,
+                markupPercentage: deriv.markupPercentage ?? null,
+              },
+            };
+          } catch (_) {
+            summary = { status: res.statusCode, ms: Date.now() - started, body: body.slice(0, 300) };
+          }
+          resolve(summary);
+        });
+      }
+    );
+    req.on('error', error => resolve({ host, path, error: String(error?.message || error) }));
+    req.on('timeout', () => {
+      req.destroy();
+      resolve({ host, path, error: 'timeout' });
+    });
+    req.end();
+  });
+}
+
+console.log('');
+console.log('### login chain verification');
+for (const target of VERIFY_REQUESTS) {
+  // eslint-disable-next-line no-await-in-loop
+  const result = await checkSiteConfig(target);
+  console.log(target.note, '->', JSON.stringify(result));
+}
+
 const rows = [];
 for (const target of TARGETS) {
   // Sequential: keep timings comparable and the run easy to read.
