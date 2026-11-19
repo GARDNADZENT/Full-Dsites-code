@@ -18,8 +18,8 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  issues: write
+  # contents:write is required to create a commit comment.
+  contents: write
 
 jobs:
   probe:
