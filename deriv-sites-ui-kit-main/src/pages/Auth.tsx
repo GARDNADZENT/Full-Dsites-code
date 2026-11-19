@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { useLocation, useNavigate } from "react-router-dom";
 import { Bot, Check, Globe2, Loader2, Lock, Mail, ShieldCheck, Wand2, X } from "lucide-react";
 import { z } from "zod";
 import { Button } from "@/components/ui/button";
@@ -9,6 +9,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/hooks/use-toast";
 import { useAuth } from "@/contexts/AuthContext";
 import { supabase } from "@/integrations/supabase/client";
+import { isAdminDestination, readNextParam } from "@/lib/auth-redirect";
 
 const emailSchema = z.string().email("Invalid email address").max(255, "Email too long");
 const strongPasswordSchema = z.string()
@@ -39,11 +40,15 @@ export default function Auth() {
   const devAuthEnabled = import.meta.env.DEV && import.meta.env.VITE_ENABLE_DEV_AUTH === "true";
   const { signIn, signUp, signInWithGoogle, resetPassword, user } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
   const { toast } = useToast();
+  // Deep links keep their destination (e.g. /admin) so sign-in returns there.
+  const destination = readNextParam(location.search);
+  const isAdminSignIn = isAdminDestination(destination);
 
   useEffect(() => {
-    if (user) navigate("/");
-  }, [user, navigate]);
+    if (user) navigate(destination, { replace: true });
+  }, [user, navigate, destination]);
 
   const validateInputs = (isSignUp = false) => {
     try {
@@ -74,7 +79,7 @@ export default function Auth() {
       return;
     }
     toast({ title: "Welcome back", description: "You are signed in to the site manager." });
-    navigate("/");
+    navigate(destination, { replace: true });
   };
 
   const handleSignUp = async (event: React.FormEvent) => {
@@ -94,7 +99,7 @@ export default function Auth() {
       return;
     }
     toast({ title: "Account Created", description: "Your account has been created successfully." });
-    navigate("/");
+    navigate(destination, { replace: true });
   };
 
   const handleGoogleSignIn = async () => {
@@ -169,8 +174,18 @@ export default function Auth() {
               <div className="mb-4 grid h-11 w-11 place-items-center rounded-md bg-slate-950 text-white lg:hidden">
                 <Globe2 className="h-5 w-5" />
               </div>
-              <h2 className="text-2xl font-semibold">{showForgotPassword ? "Reset password" : "Sign in to Site Manager"}</h2>
-              <p className="mt-1 text-sm text-slate-500">Access your customer sites, domains and publishing workflow.</p>
+              <h2 className="text-2xl font-semibold">
+                {showForgotPassword
+                  ? "Reset password"
+                  : isAdminSignIn
+                    ? "Sign in to Admin Panel"
+                    : "Sign in to Site Manager"}
+              </h2>
+              <p className="mt-1 text-sm text-slate-500">
+                {isAdminSignIn
+                  ? "Platform operator access: site pool, Deriv applications and payouts."
+                  : "Access your customer sites, domains and publishing workflow."}
+              </p>
             </div>
 
             {devAuthEnabled ? (
