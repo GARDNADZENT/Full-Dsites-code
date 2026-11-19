@@ -6,6 +6,7 @@ import {
   CheckCircle2,
   Coins,
   KeyRound,
+  Link2,
   Loader2,
   Plus,
   RefreshCw,
@@ -31,10 +32,11 @@ import {
   importDerivApps,
   markPayout,
   registerAllSiteDerivApps,
+  addAppForSite,
   registerSiteDerivApp,
   repairDerivAssignments,
   MARKUP_PRESETS,
-  saveSuperuserDerivToken,
+  saveSuperuserToken,
   syncCommissions,
   upsertPoolApp,
   type PlatformPoolApp,
@@ -119,21 +121,34 @@ const AdminDerivAppPool = () => {
 
   const saveToken = () =>
     run("token", async () => {
-      const result = await saveSuperuserDerivToken({
+      const result = await saveSuperuserToken({
         apiToken: tokenInput.trim() || undefined,
         wsAppId,
         defaultCallbackUri: callbackUri,
         defaultPlatformFeeRate: defaultFeeRate,
       });
       setTokenInput("");
+
+      // The token can be stored and verified by Deriv while app registration is
+      // still impossible, because app_register lives on a host this network cannot
+      // reach. Say so plainly instead of implying everything works.
+      if (result.appRegistration && !result.appRegistration.available) {
+        toast.warning(
+          "Token saved. Automatic app creation is unavailable: Deriv's application API host is blocked from the platform network. Create each tenant's app at developers.deriv.com, then add it under Add app.",
+          { duration: 12000 },
+        );
+      }
+
       return result.verifiedAccount
         ? `Connected Deriv ${result.verifiedAccount.loginid}`
-        : "Superuser Deriv settings saved";
+        : result.verification && !result.verification.reachable
+          ? "Token saved; Deriv could not be reached to verify it"
+          : "Superuser Deriv settings saved";
     });
 
   const disconnectToken = () =>
     run("disconnect", async () => {
-      await saveSuperuserDerivToken({ clearToken: true });
+      await saveSuperuserToken({ clearToken: true });
       return "Superuser Deriv token disconnected";
     });
 
@@ -154,6 +169,30 @@ const AdminDerivAppPool = () => {
         ? `${result.site.name} already has app ${result.app.appId}`
         : `${result.site.name} → app ${result.app.appId}${warning}`;
     });
+
+  /**
+   * Attach a DevHub-created App ID to one tenant.
+   *
+   * Automatic registration is blocked whenever Deriv's application API host is
+   * unreachable, so the operator creates the app once at developers.deriv.com and
+   * pastes the App ID here. Nothing is inferred: the ID typed is the ID bound.
+   */
+  const linkAppToSite = (site: { id: string; name: string; requestedMarkupRate: number }) => {
+    const appId = window.prompt(
+      `Deriv App ID for ${site.name}\n\nCreate the app at developers.deriv.com with callback URL:\n${callbackUri}`,
+      "",
+    );
+    if (!appId || !appId.trim()) return;
+    void run(`link:${site.id}`, async () => {
+      const result = await addAppForSite({
+        siteId: site.id,
+        derivAppId: appId.trim(),
+        callbackUri,
+        markupPercentage: site.requestedMarkupRate,
+      });
+      return `${site.name} → app ${result.app.appId}`;
+    });
+  };
 
   const repairAssignments = () =>
     run("repair", async () => {
@@ -281,6 +320,17 @@ const AdminDerivAppPool = () => {
             </div>
           ) : null}
 
+          {credential?.connected && !credential.hasAdminScope ? (
+            <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+              <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+              <span>
+                Automatic app creation is unavailable: Deriv's application API (app_register) lives on{" "}
+                <code className="font-mono">ws.derivws.com</code>, which this network cannot reach. Create each
+                tenant's app once at developers.deriv.com with the callback URL below, then add it under Add app.
+              </span>
+            </div>
+          ) : null}
+
           {credential?.lastError ? (
             <div className="flex items-start gap-2 rounded-lg border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200">
               <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
@@ -333,8 +383,10 @@ const AdminDerivAppPool = () => {
                 ) : null}
               </div>
               <p className="text-[11px] text-muted-foreground">
-                Scopes: {credential?.scopes?.length ? credential.scopes.join(", ") : "none yet"} · admin
-                scope {credential?.hasAdminScope ? "present" : "required for app_register"}.
+                Scopes: {credential?.scopes?.length ? credential.scopes.join(", ") : "none yet"}.
+                {credential?.hasAdminScope
+                  ? " admin scope present."
+                  : " admin scope is required for app_register and can only be confirmed over Deriv's WebSocket API, which this network cannot reach — tick Admin for the token and it will be used as granted."}
               </p>
               {tokenExpiryWarning ? (
                 <p className={`text-[11px] ${tokenExpired ? "text-red-300" : "text-amber-300"}`}>
@@ -586,6 +638,21 @@ const AdminDerivAppPool = () => {
                                 <Sparkles className="h-3 w-3" />
                               )}
                               <span className="ml-1">Register</span>
+                            </Button>
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              className="h-6 px-2 text-[11px]"
+                              onClick={() => linkAppToSite(site)}
+                              disabled={busy === `link:${site.id}`}
+                              title="Attach an App ID you created at developers.deriv.com"
+                            >
+                              {busy === `link:${site.id}` ? (
+                                <Loader2 className="h-3 w-3 animate-spin" />
+                              ) : (
+                                <Link2 className="h-3 w-3" />
+                              )}
+                              <span className="ml-1">Link app</span>
                             </Button>
                           </div>
                         )}
