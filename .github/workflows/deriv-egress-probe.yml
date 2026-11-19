@@ -39,13 +39,10 @@ jobs:
       - name: Plain HTTPS status sweep across Deriv hosts
         run: node scripts/deriv-egress-sweep.mjs | tee -a probe.txt
 
-      - name: Install the ws package for header control
-        # Installed into scripts/ so the ESM import resolves from the runner's
-        # working tree; without this the import fails and stage 3 is skipped.
-        run: |
-          cd scripts && npm install --no-save --no-package-lock ws@8 >> ../probe.txt 2>&1
-
-      - name: HTTPS status plus handshake with browser headers
+      - name: HTTPS status for the WebSocket endpoint
+        # No header-control retry: the 520 is an origin-side failure at
+        # Cloudflare, so browser-like headers cannot change it. The script
+        # degrades gracefully when the optional ws package is absent.
         run: node scripts/deriv-egress-handshake.mjs | tee -a probe.txt
 
       - name: DNS and raw TCP context
