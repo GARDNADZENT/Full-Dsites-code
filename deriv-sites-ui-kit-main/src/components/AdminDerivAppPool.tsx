@@ -60,7 +60,6 @@ const AdminDerivAppPool = () => {
   const [newAppName, setNewAppName] = useState("");
   const [newAppMarkup, setNewAppMarkup] = useState(2.5);
   const [newAppSecret, setNewAppSecret] = useState("");
-  const [syncToDeriv, setSyncToDeriv] = useState(false);
 
   const statusQuery = useQuery({
     queryKey: ["superuser-deriv-status"],
@@ -215,17 +214,9 @@ const AdminDerivAppPool = () => {
   const addManualApp = () =>
     run("manual", async () => {
       if (!newAppId.trim()) throw new Error("Deriv App ID is required");
-      // Deriv's app_update only accepts alphanumerics, spaces, underscores and hyphens (max 48),
-      // so the name is tightened whenever the change is pushed to Deriv.
-      const rawName = newAppName.trim() || `DSites Pool ${formatMarkupRate(newAppMarkup)} Markup`;
-      const safeName = syncToDeriv
-        ? rawName
-            .replace(/deriv/gi, "DSites")
-            .replace(/[^a-zA-Z0-9 _-]/g, "")
-            .replace(/\s{2,}/g, " ")
-            .trim()
-            .slice(0, 48) || `DSites Pool ${formatMarkupRate(newAppMarkup)}`
-        : rawName;
+      // app_update is a legacy-only method, so nothing is pushed to Deriv here;
+      // the pool row is local and the App ID is the authoritative link.
+      const safeName = newAppName.trim() || `DSites Pool ${formatMarkupRate(newAppMarkup)} Markup`;
       const result = await upsertPoolApp({
         appId: newAppId.trim(),
         oauthClientId: newAppId.trim(),
@@ -234,12 +225,11 @@ const AdminDerivAppPool = () => {
         callbackUri,
         clientSecret: newAppSecret.trim() || undefined,
         isDefault: true,
-        syncToDeriv,
       });
       setNewAppId("");
       setNewAppName("");
       setNewAppSecret("");
-      return `Pool app ${result.app.appId} saved${result.syncedToDeriv ? " and synced to Deriv" : ""}`;
+      return `Pool app ${result.app.appId} saved`;
     });
 
   const syncLedger = () =>
@@ -265,7 +255,6 @@ const AdminDerivAppPool = () => {
         callbackUri: app.callbackUri,
         environment: app.environment,
         configuredScopes: app.configuredScopes,
-        legacyAppId: app.legacyAppId || undefined,
         notes: app.notes || undefined,
         isActive: !app.isActive,
         // The Edge Function clears competing defaults whenever isDefault is true.
@@ -353,7 +342,7 @@ const AdminDerivAppPool = () => {
                 type="password"
                 value={tokenInput}
                 onChange={event => setTokenInput(event.target.value)}
-                placeholder={credential?.connected ? "Replace existing CR… token (optional)" : "Paste a Deriv API token with admin scope"}
+                placeholder={credential?.connected ? "Replace existing Deriv token (optional)" : "Paste a Deriv API token"}
                 autoComplete="off"
               />
               <div className="grid gap-3 sm:grid-cols-2">
@@ -396,9 +385,7 @@ const AdminDerivAppPool = () => {
               </div>
               <p className="text-[11px] text-muted-foreground">
                 Scopes: {credential?.scopes?.length ? credential.scopes.join(", ") : "none yet"}.
-                {credential?.hasAdminScope
-                  ? " admin scope present."
-                  : " admin scope applies to legacy apps only. OAuth 2.0 apps use trade, account_manage, application_read and payment, none of which can register applications — so no token can enable automatic app creation."}
+                {" "}Deriv OAuth 2.0 scopes are trade, account_manage, application_read and payment; there is no admin scope, and none of them can register applications.
               </p>
               {tokenExpiryWarning ? (
                 <p className={`text-[11px] ${tokenExpired ? "text-red-300" : "text-amber-300"}`}>
@@ -472,9 +459,10 @@ const AdminDerivAppPool = () => {
               placeholder="Client secret (optional, encrypted)"
               autoComplete="off"
             />
-            <div className="flex items-center justify-between rounded-md border border-white/10 bg-white/5 px-3 py-2">
-              <span className="text-xs text-muted-foreground">Push markup + callback to Deriv (app_update)</span>
-              <Switch checked={syncToDeriv} onCheckedChange={setSyncToDeriv} />
+            <div className="flex items-center rounded-md border border-white/10 bg-white/5 px-3 py-2">
+              <span className="text-xs text-muted-foreground">
+                Set markup and the callback URL on this app in the Deriv dashboard; the platform cannot push them.
+              </span>
             </div>
           </div>
 
@@ -504,7 +492,6 @@ const AdminDerivAppPool = () => {
                     </div>
                     <p className="mt-1 text-xs text-muted-foreground break-all">
                       App {app.appId} · OAuth {app.oauthClientId} · {app.registrationSource}
-                      {app.legacyAppId ? ` · legacy ${app.legacyAppId}` : ""}
                     </p>
                     <p className="text-xs text-muted-foreground">
                       <Users className="mr-1 inline h-3 w-3" />

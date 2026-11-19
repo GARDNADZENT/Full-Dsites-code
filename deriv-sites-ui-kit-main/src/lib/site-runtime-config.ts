@@ -91,8 +91,6 @@ export type SiteDerivAppInput = Pick<
   | "oauth_client_id"
   | "deriv_app_id"
   | "redirect_uri"
-  | "use_legacy_oauth_login"
-  | "include_legacy_app_id_in_oauth"
 >;
 
 export type SiteDomainInput = Pick<
@@ -246,8 +244,6 @@ export async function upsertSiteDerivApp(siteId: string, input: SiteDerivAppInpu
     oauth_client_id: input.oauth_client_id?.trim() || null,
     deriv_app_id: input.deriv_app_id?.trim() || null,
     redirect_uri: input.redirect_uri?.trim() || null,
-    use_legacy_oauth_login: input.use_legacy_oauth_login ?? false,
-    include_legacy_app_id_in_oauth: input.include_legacy_app_id_in_oauth ?? false,
   };
 
   const { data, error } = await supabase

@@ -336,34 +336,28 @@ export type Database = {
           created_at: string
           deriv_app_id: string | null
           id: string
-          include_legacy_app_id_in_oauth: boolean
           oauth_client_id: string | null
           redirect_uri: string | null
           site_id: string
           updated_at: string
-          use_legacy_oauth_login: boolean
         }
         Insert: {
           created_at?: string
           deriv_app_id?: string | null
           id?: string
-          include_legacy_app_id_in_oauth?: boolean
           oauth_client_id?: string | null
           redirect_uri?: string | null
           site_id: string
           updated_at?: string
-          use_legacy_oauth_login?: boolean
         }
         Update: {
           created_at?: string
           deriv_app_id?: string | null
           id?: string
-          include_legacy_app_id_in_oauth?: boolean
           oauth_client_id?: string | null
           redirect_uri?: string | null
           site_id?: string
           updated_at?: string
-          use_legacy_oauth_login?: boolean
         }
         Relationships: [
           {

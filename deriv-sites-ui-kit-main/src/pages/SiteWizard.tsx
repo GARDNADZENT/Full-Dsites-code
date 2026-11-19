@@ -1065,8 +1065,6 @@ const SiteWizard = () => {
           deriv_app_id: syncedDraft.deriv.appId || null,
           oauth_client_id: syncedDraft.deriv.oauthClientId || null,
           redirect_uri: syncedDraft.deriv.callbackUri || CENTRAL_DERIV_CALLBACK_URL,
-          use_legacy_oauth_login: false,
-          include_legacy_app_id_in_oauth: false,
           deriv_mode: syncedDraft.deriv.mode,
           markup_percentage: clampMarkupRate(syncedDraft.deriv.markupRate),
           platform_deriv_app_id: platformAssign?.status === "assigned" ? platformAssign.platformDerivAppId : null,

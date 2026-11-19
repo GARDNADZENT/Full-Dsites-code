@@ -49,7 +49,6 @@ export type PlatformPoolApp = {
   appId: string;
   oauthClientId: string;
   hasClientSecret: boolean;
-  legacyAppId: string | null;
   callbackUri: string;
   environment: "production" | "staging";
   markupPercentage: number;
@@ -352,7 +351,6 @@ export async function upsertPoolApp(input: {
   appId: string;
   oauthClientId?: string;
   clientSecret?: string;
-  legacyAppId?: string;
   callbackUri?: string;
   environment?: "production" | "staging";
   markupPercentage: number;
@@ -360,9 +358,8 @@ export async function upsertPoolApp(input: {
   isDefault?: boolean;
   isActive?: boolean;
   notes?: string;
-  syncToDeriv?: boolean;
-}): Promise<{ app: PlatformPoolApp; syncedToDeriv: boolean; rebalancedSites: number }> {
-  // Display names stay intact locally; the Edge Function sanitizes the name it sends to Deriv.
+}): Promise<{ app: PlatformPoolApp; rebalancedSites: number }> {
+  // Display names stay intact locally; nothing is pushed to Deriv (app_update is legacy-only).
   return invokeManagePlatformDeriv({ action: "upsert_pool_app", ...input });
 }
 
@@ -486,9 +483,9 @@ export type SuperuserTokenVerification = {
 /**
  * Save the superuser Deriv token, verifying it over Deriv's REST API.
  *
- * Verification deliberately avoids the WebSocket API: the legacy WS hosts that
- * carry `authorize` and `app_register` are unreachable from the platform network,
- * so a WS check would reject valid tokens with a network error.
+ * Verification uses the new platform's REST API (api.derivws.com) with a Bearer
+ * token and a Deriv-App-ID header. The legacy WebSocket stack that carried
+ * `authorize` has been removed from the platform entirely.
  */
 export async function saveSuperuserToken(input: {
   apiToken?: string;
