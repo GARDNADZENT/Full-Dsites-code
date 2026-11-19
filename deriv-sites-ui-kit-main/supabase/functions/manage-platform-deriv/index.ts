@@ -535,7 +535,7 @@ Deno.serve(async (req) => {
           .order("is_primary", { ascending: false }),
         admin
           .from("deriv_applications")
-          .select("site_id, app_id, oauth_client_id, markup_rate, source_type, verification_status"),
+          .select("site_id, app_id, oauth_client_id, callback_uri, markup_rate, source_type, verification_status"),
         admin.from("site_trader_attributions").select("site_id, account_type"),
         admin
           .from("site_commission_ledger")
@@ -697,6 +697,7 @@ Deno.serve(async (req) => {
               ? Number(da.markup_rate)
               : null,
             assignedAppId: da?.app_id || null,
+            callbackUri: da?.callback_uri || null,
             platformFeeRate: Number(s.platform_fee_rate ?? 17),
             realTraders: tc.real,
             demoTraders: tc.demo,
@@ -1031,6 +1032,74 @@ Deno.serve(async (req) => {
         },
         503,
       );
+    }
+
+    // -----------------------------------------------------------------------
+    // Action: update_deriv_application_callback
+    //
+    // Deriv rejects a login whose redirect_uri is not registered on the OAuth
+    // 2.0 client, with "does not match any of the OAuth 2.0 Client's
+    // pre-registered redirect urls". The platform controls the value it sends,
+    // so it can be corrected here instead of in DevHub -- which matters because
+    // the registered URI may already be the tenant origin (trader logins go
+    // through the tenant's own /api/deriv-oauth-callback rewrite).
+    //
+    // Written in all three places the flow reads it from, so a later rebind
+    // cannot restore the stale value.
+    // -----------------------------------------------------------------------
+    if (action === "update_deriv_application_callback") {
+      const siteId = String(body.siteId || "").trim();
+      if (!siteId) return json({ error: "siteId is required" }, 400);
+      const callbackUri = validateHttpsUrl(body.callbackUri, DEFAULT_CALLBACK_URI);
+
+      const { data: application, error: readError } = await admin
+        .from("deriv_applications")
+        .select("id, app_id, callback_uri, platform_deriv_app_id")
+        .eq("site_id", siteId)
+        .maybeSingle();
+      if (readError) throw readError;
+      if (!application) {
+        return json(
+          { error: "This site has no Deriv application assigned yet. Add one under Pool apps first." },
+          404,
+        );
+      }
+
+      const unchanged = application.callback_uri === callbackUri;
+      const nowIso = new Date().toISOString();
+
+      if (!unchanged) {
+        const { error } = await admin
+          .from("deriv_applications")
+          .update({ callback_uri: callbackUri, updated_at: nowIso })
+          .eq("id", application.id);
+        if (error) throw error;
+      }
+
+      // site_deriv_apps mirrors the value for the admin/site views.
+      await admin.from("site_deriv_apps").update({ redirect_uri: callbackUri }).eq("site_id", siteId);
+
+      if (application.platform_deriv_app_id) {
+        await admin
+          .from("platform_deriv_apps")
+          .update({ callback_uri: callbackUri, updated_at: nowIso })
+          .eq("id", application.platform_deriv_app_id);
+      }
+
+      await auditLog(admin, {
+        userId: user.id,
+        actorType: "platform_admin",
+        action: "superuser.deriv_pool.callback_uri_updated",
+        siteId,
+        metadata: {
+          appId: application.app_id,
+          previousCallbackUri: application.callback_uri,
+          callbackUri,
+          unchanged,
+        },
+      });
+
+      return json({ callbackUri, callbackUpdated: !unchanged });
     }
 
     // -----------------------------------------------------------------------
