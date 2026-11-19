@@ -12,6 +12,7 @@ import { Localize } from '@deriv-com/translations';
 import { Header, useDevice, Wrapper } from '@deriv-com/ui';
 import { AppLogo } from '../app-logo';
 import AccountSwitcher from './account-switcher';
+import AuthErrorNotice from './auth-error-notice';
 import DarkModeToggle from './DarkModeToggle';
 import MenuItems from './menu-items';
 import MobileMenu from './mobile-menu';
@@ -195,6 +196,7 @@ const AppHeader = observer(() => {
 
     return (
         <>
+            <AuthErrorNotice />
             <Header
                 className={clsx('app-header', {
                     'app-header--desktop': isDesktop,

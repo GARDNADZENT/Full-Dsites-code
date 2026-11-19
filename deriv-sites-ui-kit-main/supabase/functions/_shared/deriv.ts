@@ -54,25 +54,15 @@ export async function getValidAccessToken(record: {
   scopes: string[];
 }, application: { oauth_client_id: string }, table: 'encrypted_token_records' | 'owner_deriv_connections' = 'encrypted_token_records'): Promise<string> {
   if (Date.parse(record.expires_at) > Date.now() + 60_000) return decryptSecret(record.access_token_encrypted);
-  if (!record.refresh_token_encrypted) throw Object.assign(new Error('Deriv session expired'), { code: 'session_expired', status: 401 });
 
-  const refreshToken = await decryptSecret(record.refresh_token_encrypted);
-  const response = await fetch(DERIV_TOKEN_URL, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
-    body: new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refreshToken, client_id: application.oauth_client_id }),
+  // Deriv issues no refresh token to third-party apps: the token response has no
+  // refresh_token field, and sending grant_type=refresh_token never returns one.
+  // Expired really does mean re-authorization, so this is reported as such rather
+  // than attempting an exchange that can only fail.
+  throw Object.assign(new Error('Deriv sign-in has expired, log in again'), {
+    code: 'session_expired',
+    status: 401,
   });
-  if (!response.ok) throw Object.assign(new Error('Deriv token refresh failed'), await parseError(response));
-  const token: TokenResponse = await response.json();
-  const expiresAt = new Date(Date.now() + (token.expires_in || 3600) * 1000).toISOString();
-  await supabaseAdmin().from(table).update({
-    access_token_encrypted: await encryptSecret(token.access_token),
-    refresh_token_encrypted: token.refresh_token ? await encryptSecret(token.refresh_token) : record.refresh_token_encrypted,
-    token_type: token.token_type || 'Bearer',
-    scopes: token.scope ? token.scope.split(/\s+/).filter(Boolean) : record.scopes,
-    expires_at: expiresAt,
-  }).eq('id', record.id);
-  return token.access_token;
 }
 
 export async function derivRequest<T>(path: string, input: {

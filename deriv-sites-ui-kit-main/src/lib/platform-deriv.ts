@@ -90,6 +90,8 @@ export type PlatformSiteSummary = {
   requestedMarkupRate: number;
   appliedMarkupRate: number | null;
   assignedAppId: string | null;
+  /** Exact redirect_uri sent to Deriv for this site's login. */
+  callbackUri: string | null;
   platformFeeRate: number;
   realTraders: number;
   demoTraders: number;
@@ -129,6 +131,8 @@ export type SiteCommissionsResponse = {
     requestedMarkupRate: number;
     appliedMarkupRate: number;
     assignedAppId: string | null;
+  /** Exact redirect_uri sent to Deriv for this site's login. */
+  callbackUri: string | null;
     platformFeeRate: number;
     ownerShareRate: number;
     ownerDerivLoginId: string | null;
@@ -527,4 +531,68 @@ export async function markPayout(input: {
   payoutReference?: string;
 }): Promise<{ paidCount: number; totalPaid: number; payoutReference: string }> {
   return invokeManagePlatformDeriv({ action: "mark_payout", ...input });
+}
+
+/**
+ * Point a tenant's Deriv login at a specific callback URL.
+ *
+ * Deriv requires the redirect_uri on the authorize request and the token
+ * exchange to match the OAuth client's registration exactly, and rejects the
+ * login with `invalid_request` when it does not. The platform controls what it
+ * sends, so this is the one side of that mismatch it can correct without DevHub.
+ *
+ * Writes through to `deriv_applications` (what `deriv-oauth-start` reads),
+ * `site_deriv_apps` and the shared pool app, so a later rebind does not quietly
+ * restore the old value.
+ */
+export async function updateDerivApplicationCallback(input: {
+  siteId: string;
+  callbackUri: string;
+}): Promise<{ callbackUri: string; callbackUpdated: boolean }> {
+  return invokeManagePlatformDeriv<{ callbackUri: string; callbackUpdated: boolean }>({
+    action: "update_deriv_application_callback",
+    siteId: input.siteId,
+    callbackUri: input.callbackUri,
+  });
+}
+
+export type CallbackVerificationStatus = "registered" | "not_registered" | "unverified";
+
+export interface CallbackVerification {
+  status: CallbackVerificationStatus;
+  message: string;
+  appId: string;
+  oauthClientId: string;
+  callbackUri: string;
+  lastAttempt: {
+    redirectUri: string | null;
+    derivErrorCode: string | null;
+    at: string;
+    stale: boolean;
+  } | null;
+}
+
+/**
+ * Ask Deriv whether a tenant's redirect URI is actually registered.
+ *
+ * Deriv validates `redirect_uri` only after the user signs in, so there is no
+ * direct API to query the registration and the published OpenAPI spec has no
+ * applications endpoint that would expose it. The one conclusive signal is a
+ * real login, so this reads back the verdict the callback recorded on the most
+ * recent attempt:
+ *
+ * - `registered`     the token exchange succeeded, so Deriv accepted the URI
+ * - `not_registered` Deriv rejected it as a pre-registered-redirect-url mismatch
+ * - `unverified`     no login has completed yet
+ *
+ * A `stale` last attempt means the URI has changed since that attempt, so the
+ * verdict describes the old value and a fresh login is needed.
+ */
+export async function checkDerivApplicationCallback(
+  siteId: string,
+): Promise<CallbackVerification> {
+  return invokeManagePlatformDeriv<CallbackVerification>({
+    action: "check_deriv_application_callback",
+    siteId,
+  });
 }

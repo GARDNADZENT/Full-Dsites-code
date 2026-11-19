@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
-  ArrowDownUp,
   BadgeCheck,
   CheckCircle2,
   Coins,
@@ -11,7 +10,6 @@ import {
   Plus,
   RefreshCw,
   ShieldCheck,
-  Sparkles,
   Trash2,
   Users,
   Wallet,
@@ -29,11 +27,8 @@ import {
   deletePoolApp,
   formatMarkupRate,
   getSuperuserDerivStatus,
-  importDerivApps,
   markPayout,
-  registerAllSiteDerivApps,
   addAppForSite,
-  registerSiteDerivApp,
   repairDerivAssignments,
   MARKUP_PRESETS,
   saveSuperuserToken,
@@ -80,12 +75,6 @@ const AdminDerivAppPool = () => {
     setDefaultFeeRate(credential.defaultPlatformFeeRate ?? 17);
   }, [credential]);
 
-  // A tenant without a pinned app cannot log in at all (deriv-oauth-start returns
-  // 409 deriv_app_missing), so surface them instead of waiting for a report.
-  const unboundSites = useMemo(
-    () => sites.filter(site => site.status !== "deleted" && site.derivMode !== "custom" && !site.assignedAppId),
-    [sites],
-  );
 
   // The token is the single credential every tenant login depends on; an expiry
   // takes the whole platform down, so warn well before it lands.
@@ -155,23 +144,7 @@ const AdminDerivAppPool = () => {
       return "Superuser Deriv token disconnected";
     });
 
-  const registerAll = () =>
-    run("register-all", async () => {
-      const result = await registerAllSiteDerivApps();
-      const parts = [`${result.registered.length} tenant app${result.registered.length === 1 ? "" : "s"} registered`];
-      if (result.skipped) parts.push(`${result.skipped} already bound`);
-      if (result.failed.length) parts.push(`${result.failed.length} failed`);
-      return parts.join(" · ");
-    });
 
-  const registerOne = (siteId: string) =>
-    run(`register:${siteId}`, async () => {
-      const result = await registerSiteDerivApp(siteId);
-      const warning = result.registrationWarnings?.length ? ` · ${result.registrationWarnings[0]}` : "";
-      return result.status === "already_registered"
-        ? `${result.site.name} already has app ${result.app.appId}`
-        : `${result.site.name} → app ${result.app.appId}${warning}`;
-    });
 
   /**
    * Attach a DevHub-created App ID to one tenant.
@@ -205,11 +178,6 @@ const AdminDerivAppPool = () => {
         : `${result.repairedSites} site${result.repairedSites === 1 ? "" : "s"} rebound to their own app`;
     });
 
-  const importApps = () =>
-    run("import", async () => {
-      const result = await importDerivApps();
-      return `${result.imported} of ${result.totalFound} Deriv apps imported`;
-    });
 
   const addManualApp = () =>
     run("manual", async () => {
@@ -394,41 +362,6 @@ const AdminDerivAppPool = () => {
               ) : null}
             </div>
 
-            <div className="space-y-3 rounded-lg border border-white/10 bg-white/5 p-4">
-              <p className="text-sm font-medium text-foreground flex items-center gap-2">
-                <Sparkles className="h-4 w-4 text-primary" />
-                One app per tenant
-              </p>
-              <p className="text-xs text-muted-foreground">
-                Registers a separate Deriv app for each tenant site, with its own App ID and callback, so every
-                tenant's markup stays attributable and the split stays auditable.
-              </p>
-              <div className="flex flex-wrap gap-2">
-                <Button onClick={() => void registerAll()} disabled={busy === "register-all" || !credential?.connected}>
-                  {busy === "register-all" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <Sparkles className="mr-2 h-4 w-4" />}
-                  Register tenant apps
-                </Button>
-                <Button variant="outline" onClick={() => void repairAssignments()} disabled={busy === "repair"}>
-                  {busy === "repair" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <RefreshCw className="mr-2 h-4 w-4" />}
-                  Repair assignments
-                </Button>
-                <Button variant="outline" onClick={() => void importApps()} disabled={busy === "import" || !credential?.connected}>
-                  {busy === "import" ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : <ArrowDownUp className="mr-2 h-4 w-4" />}
-                  Import existing apps
-                </Button>
-              </div>
-              {!credential?.connected ? (
-                <p className="text-[11px] text-amber-300">Connect a Deriv admin token to auto-register apps.</p>
-              ) : null}
-              {unboundSites.length ? (
-                <p className="text-[11px] text-muted-foreground">
-                  {unboundSites.length} tenant site{unboundSites.length === 1 ? "" : "s"} without an app:{" "}
-                  {unboundSites.map(site => site.name).join(", ")}
-                </p>
-              ) : (
-                <p className="text-[11px] text-emerald-300">Every tenant site has its own app.</p>
-              )}
-            </div>
           </div>
         </CardContent>
       </Card>
@@ -609,35 +542,12 @@ const AdminDerivAppPool = () => {
                             <span className="rounded-full bg-emerald-500/15 px-2 py-0.5 text-[11px] text-emerald-300">
                               app {site.assignedAppId}
                             </span>
-                            <button
-                              type="button"
-                              className="text-[11px] text-muted-foreground underline decoration-dotted hover:text-foreground"
-                              onClick={() => void registerOne(site.id)}
-                              disabled={busy === `register:${site.id}`}
-                              title="Re-register this tenant's app"
-                            >
-                              {busy === `register:${site.id}` ? "working…" : "re-register"}
-                            </button>
                           </div>
                         ) : (
                           <div className="flex items-center gap-2">
                             <span className="rounded-full bg-amber-500/15 px-2 py-0.5 text-[11px] text-amber-300">
                               no app
                             </span>
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              className="h-6 px-2 text-[11px]"
-                              onClick={() => void registerOne(site.id)}
-                              disabled={busy === `register:${site.id}` || !credential?.connected}
-                            >
-                              {busy === `register:${site.id}` ? (
-                                <Loader2 className="h-3 w-3 animate-spin" />
-                              ) : (
-                                <Sparkles className="h-3 w-3" />
-                              )}
-                              <span className="ml-1">Register</span>
-                            </Button>
                             <Button
                               size="sm"
                               variant="ghost"
