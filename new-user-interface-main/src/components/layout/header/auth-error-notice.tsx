@@ -25,14 +25,15 @@ const FAILURES: Record<string, Failure> = {
             'Deriv rejected the login because the site’s callback address is not verified on its Deriv application. The site operator needs to finish registering it; trying again will not help until then.',
         actionable: false,
     },
-    // Deriv's own code, propagated verbatim by the callback. It is returned when
-    // Deriv refuses the authorization request outright -- which on the current
-    // portal is what an unverified app looks like, not a cancelled login.
+    // Deriv's own code, propagated verbatim by the callback: it refuses the
+    // authorization request outright, before issuing a code. This is transient in
+    // practice -- plausible logins on the same application succeed minutes apart
+    // -- so it is not reported as a permanent misconfiguration.
     request_forbidden: {
         title: 'Deriv refused this login',
         detail:
-            'Deriv rejected the sign-in request before issuing a credential, which usually means the site’s Deriv application has not been approved yet. The site operator needs to finish that; trying again will not help until then.',
-        actionable: false,
+            'Deriv declined the sign-in request before issuing a credential. Trying again usually works; if it keeps happening, the site operator needs to check the Deriv application.',
+        actionable: true,
     },
     invalid_request: {
         title: 'Deriv rejected this site’s login request',
@@ -43,7 +44,7 @@ const FAILURES: Record<string, Failure> = {
     token_exchange_failed: {
         title: 'Deriv could not complete the sign-in',
         detail:
-            'The login was cancelled, the code expired, or Deriv rejected the request. Please try again.',
+            'Deriv approved the login but the last step did not finish, usually because the sign-in link had already been used or expired. Please try again.',
         actionable: true,
     },
     required_scope_missing: {
@@ -75,6 +76,15 @@ const FAILURES: Record<string, Failure> = {
     handoff_failed: {
         title: 'Could not finish the sign-in on this site',
         detail: 'Deriv signed you in but the session could not be set up here. Please log in again.',
+        actionable: true,
+    },
+    // The session was created centrally, then handed to this domain to become a
+    // first-party cookie. If that hop is refused the trader is signed in on the
+    // platform but not here, which is worth saying plainly.
+    handoff_host_mismatch: {
+        title: 'Signed in, but not on this address',
+        detail:
+            'Deriv approved the login, but this site could not accept the session on the address you used. Open the site on its main domain and try again.',
         actionable: true,
     },
 };
