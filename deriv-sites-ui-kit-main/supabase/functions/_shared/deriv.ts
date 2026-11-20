@@ -45,6 +45,23 @@ export async function exchangeAuthorizationCode(input: {
   return await response.json();
 }
 
+/**
+ * Deriv account prefixes that are virtual (demo) accounts.
+ *
+ * Must stay in step with new-user-interface-main/src/utils/account-helpers.ts,
+ * which has treated DOT as demo all along. Server-side code previously accepted
+ * only VRTC/VRW, so it labelled Deriv's DOT accounts -- which are demo -- as
+ * real-money accounts. That is the dangerous direction to get wrong, so unknown
+ * prefixes are treated as real and refused, never assumed demo.
+ */
+const DEMO_ACCOUNT_PREFIXES = ['VRTC', 'VRW', 'DEM', 'DOT'] as const;
+
+export const isDemoAccountId = (accountId: string | null | undefined): boolean =>
+  !!accountId && DEMO_ACCOUNT_PREFIXES.some(prefix => accountId.toUpperCase().startsWith(prefix));
+
+export const accountTypeFromId = (accountId: string | null | undefined): 'demo' | 'real' =>
+  isDemoAccountId(accountId) ? 'demo' : 'real';
+
 export async function getValidAccessToken(record: {
   id: string;
   access_token_encrypted: string;

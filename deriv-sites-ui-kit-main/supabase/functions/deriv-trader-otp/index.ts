@@ -316,6 +316,17 @@ async function requireTraderSession(req: Request, requireCsrf = false) {
   return { origin, session, accessToken, csrfToken: await decryptSecret(session.csrf_secret_encrypted) };
 }
 
+/**
+ * Deriv account prefixes that are virtual (demo) accounts.
+ *
+ * Kept in step with _shared/deriv.ts and with the tenant UI's
+ * account-helpers.ts. Accepting only VRTC/VRW mislabelled Deriv's DOT accounts as
+ * real-money accounts, and DOT is demo.
+ */
+const DEMO_ACCOUNT_PREFIXES = ['VRTC', 'VRW', 'DEM', 'DOT'] as const;
+const accountTypeFromId = (accountId: string | null | undefined): 'demo' | 'real' =>
+  !!accountId && DEMO_ACCOUNT_PREFIXES.some(prefix => accountId.toUpperCase().startsWith(prefix)) ? 'demo' : 'real';
+
 const ACCOUNT_ID = /^[A-Z0-9]{3,32}$/;
 
 Deno.serve(async req => {
@@ -354,7 +365,7 @@ Deno.serve(async req => {
         platform_deriv_app_id: context.session.token.application.platform_deriv_app_id || null,
         deriv_app_id: context.session.token.application.app_id,
         deriv_loginid: accountId,
-        account_type: accountId.startsWith('VRTC') || accountId.startsWith('VRW') ? 'demo' : 'real',
+        account_type: accountTypeFromId(accountId),
         last_seen_at: nowIso,
         updated_at: nowIso,
       }, { onConflict: 'site_id,deriv_loginid' });

@@ -10,6 +10,7 @@ import OnboardTourHandler from '../tutorials/dbot-tours/onboarding-tour';
 import Announcements from './announcements';
 import Cards from './cards';
 import InfoPanel from './info-panel';
+import DemoTradePanel from './demo-trade-panel';
 
 type TMobileIconGuide = {
     handleTabChange: (active_number: number) => void;
@@ -62,6 +63,8 @@ const DashboardComponent = observer(({ handleTabChange }: TMobileIconGuide) => {
                             </Text>
                         </div>
                         <Cards has_dashboard_strategies={has_dashboard_strategies} is_mobile={!isDesktop} />
+                        {/* Real trades on the trader's Deriv demo account, recorded per tenant. */}
+                        <DemoTradePanel />
                     </div>
                 </div>
             </div>

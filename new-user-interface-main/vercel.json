@@ -27,6 +27,10 @@
       "destination": "https://fanrhtqyjajhacrmrbfv.supabase.co/functions/v1/deriv-trader-otp"
     },
     {
+      "source": "/api/deriv-demo-trade",
+      "destination": "https://fanrhtqyjajhacrmrbfv.supabase.co/functions/v1/deriv-demo-trade"
+    },
+    {
       "source": "/api/public-site-config",
       "destination": "https://fanrhtqyjajhacrmrbfv.supabase.co/functions/v1/public-site-config"
     },

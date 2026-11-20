@@ -20,6 +20,10 @@ export type LedgerRow = {
   payout_status: string | null;
   /** True when the row came from the commission simulator, not from Deriv. */
   is_simulated: boolean | null;
+  /** 'demo' rows are real trades on a virtual account: never payable. */
+  account_type: string | null;
+  /** 'allocated' means the per-tenant amount is ours, not reported by Deriv. */
+  markup_basis: string | null;
   payout_reference: string | null;
   paid_at: string | null;
   traded_at: string | null;
@@ -42,6 +46,8 @@ const SELECT = `
   attribution_status,
   payout_status,
   is_simulated,
+  account_type,
+  markup_basis,
   payout_reference,
   paid_at,
   traded_at,
@@ -103,6 +109,7 @@ export function useCommissions(options?: {
         .filter(
           (row) =>
             row.is_simulated !== true &&
+            (row.account_type ?? "demo") !== "demo" &&
             (row.payout_status ?? "").toLowerCase() !== "paid",
         )
         .reduce(
@@ -119,12 +126,15 @@ export function useCommissions(options?: {
           0,
         ),
       simulatedCount: rows.filter((row) => row.is_simulated === true).length,
+      /** Demo-trade rows: real activity, never payable. */
+      demoCount: rows.filter((row) => row.is_simulated !== true && row.account_type === "demo").length,
       discrepancyMinor: ledgerDiscrepancyMinor(rows),
       paidCount: rows.filter((row) => (row.payout_status ?? "").toLowerCase() === "paid")
         .length,
       pendingCount: rows.filter(
         (row) =>
           row.is_simulated !== true &&
+          (row.account_type ?? "demo") !== "demo" &&
           (row.payout_status ?? "").toLowerCase() !== "paid",
       ).length,
     };

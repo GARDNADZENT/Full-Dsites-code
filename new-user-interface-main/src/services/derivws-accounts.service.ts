@@ -1,5 +1,5 @@
 import { getRuntimeSiteConfig } from '@/config/runtime-site-config';
-import { TraderGatewayClient, type TraderAccount, type TraderSessionStatus } from '@reef-sites/deriv-auth';
+import { TraderGatewayClient, type DemoTradeInput, type DemoTradeResult, type TraderAccount, type TraderSessionStatus } from '@reef-sites/deriv-auth';
 import type { DerivScope } from '@reef-sites/shared-types';
 
 export type DerivAccount = TraderAccount;
@@ -104,6 +104,33 @@ export class DerivWSAccountsService {
         localStorage.setItem('active_loginid', selected.account_id);
         localStorage.setItem('account_type', selected.account_type);
         return this.fetchOTPWebSocketURL(selected.account_id);
+    }
+
+    /**
+     * The demo account this browser is currently trading as, or null.
+     *
+     * Demo only: this is used to place practice trades, so a real account is never
+     * returned even if one is selected. The server re-checks with Deriv and
+     * refuses anything it reports as real.
+     */
+    static getSelectedDemoAccount(): DerivAccount | null {
+        const accounts = this.getStoredAccounts() || [];
+        const selectedId = localStorage.getItem('active_loginid');
+        const selected =
+            accounts.find(account => account.account_id === selectedId && account.account_type === 'demo') ||
+            accounts.find(account => account.account_type === 'demo') ||
+            null;
+        return selected;
+    }
+
+    /** Place one real contract on the selected demo account. */
+    static async placeDemoTrade(input: Omit<DemoTradeInput, 'accountId'>): Promise<DemoTradeResult> {
+        const account = this.getSelectedDemoAccount();
+        if (!account) {
+            throw new Error('No demo account is available in this Deriv session. Switch to a demo account and try again.');
+        }
+        const response = await this.getGateway().placeDemoTrade({ ...input, accountId: account.account_id });
+        return response.data;
     }
 
     static async logout(): Promise<void> {

@@ -10,7 +10,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useAdminRole } from "@/hooks/useAdminRole";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import AdminMarkupStats from "@/components/AdminMarkupStats";
-import CommissionSimulator from "@/components/CommissionSimulator";
+import AdminDemoCommissions from "@/components/AdminDemoCommissions";
 import AdminDerivAppPool from "@/components/AdminDerivAppPool";
 import { AdminTenantDerivApps } from "@/components/AdminTenantDerivApps";
 interface XmlBot {
@@ -847,7 +847,7 @@ const Admin = () => {
 
         {canViewFinance && <TabsContent value="finance" className="space-y-4">
           <AdminMarkupStats enabled={canViewFinance} />
-          {canViewFinance ? <CommissionSimulator /> : null}
+          {canViewFinance ? <AdminDemoCommissions /> : null}
         </TabsContent>}
 
         {isAdmin && <TabsContent value="deriv-pool">
