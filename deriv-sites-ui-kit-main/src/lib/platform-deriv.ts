@@ -596,3 +596,121 @@ export async function checkDerivApplicationCallback(
     siteId,
   });
 }
+
+// ---------------------------------------------------------------------------
+// Commission simulation
+//
+// There is no writer for site_commission_ledger and Deriv's new API cannot
+// report earned markup, so the split is only observable by simulation. The
+// formula is Deriv's own: API Terms §4.3.3 computes app markup per trade from
+// the contract *payout* and the configured markup percentage, truncating to zero
+// any amount below the smallest unit of the account currency.
+// ---------------------------------------------------------------------------
+
+export type SimulatedSiteTotals = {
+  siteId: string;
+  siteName: string;
+  markupRate: number;
+  platformFeeRate: number;
+  trades: number;
+  truncatedTrades: number;
+  payoutTotal: number;
+  grossTotal: number;
+  feeTotal: number;
+  ownerTotal: number;
+};
+
+export type SimulatedTrade = {
+  siteId: string;
+  siteName: string;
+  contractId: string;
+  payout: number;
+  stake: number;
+  markupRate: number;
+  gross: number;
+  fee: number;
+  ownerNet: number;
+  truncatedToZero: boolean;
+};
+
+export type SimulateCommissionsResult = {
+  runId: string;
+  inserted: number;
+  skipped: number;
+  basis: "payout";
+  formula: string;
+  sites: SimulatedSiteTotals[];
+  trades: SimulatedTrade[];
+};
+
+/**
+ * Run the commission simulation.
+ *
+ * The arithmetic and the ledger write both happen inside the database function,
+ * so the formula and the rows it produces can never disagree, and a run is a
+ * single transaction. Nothing here writes to site config: per-tenant margins are
+ * arguments to this call only.
+ */
+export async function simulateCommissions(input: {
+  siteIds?: string[];
+  tradesPerSite?: number;
+  payoutMin?: number;
+  payoutMax?: number;
+  runId?: string;
+  /** When true each tenant gets baseRate + index * rateStep instead of its own rate. */
+  marginSpread?: boolean;
+  baseRate?: number;
+  rateStep?: number;
+}): Promise<SimulateCommissionsResult> {
+  // Newer RPC is not in the generated Database types yet, so it is called
+  // through the untyped client, the same way get_platform_deriv_pool_status is.
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const db = supabase as any;
+  const { data, error } = await db.rpc("simulate_commissions", {
+    _run_id: input.runId ?? null,
+    _site_ids: input.siteIds ?? null,
+    _trades_per_site: input.tradesPerSite ?? 5,
+    _payout_min: input.payoutMin ?? 10,
+    _payout_max: input.payoutMax ?? 200,
+    _margin_spread: input.marginSpread ?? true,
+    _base_rate: input.baseRate ?? 1,
+    _rate_step: input.rateStep ?? 1,
+  });
+  if (error) throw error;
+  return data as SimulateCommissionsResult;
+}
+
+export type CommissionLedgerTotal = {
+  siteId: string;
+  siteName: string;
+  isSimulated: boolean;
+  trades: number;
+  truncatedTrades: number;
+  grossTotal: number;
+  feeTotal: number;
+  ownerTotal: number;
+};
+
+/** Per-tenant totals over the ledger as a whole, real and simulated separately. */
+export async function fetchCommissionLedgerTotals(options?: {
+  simulatedOnly?: boolean;
+  runId?: string;
+}): Promise<CommissionLedgerTotal[]> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const db = supabase as any;
+  const { data, error } = await db.rpc("commission_ledger_totals", {
+    _is_simulated: options?.simulatedOnly ?? null,
+    _run_id: options?.runId ?? null,
+  });
+  if (error) throw error;
+  return ((data ?? []) as Record<string, unknown>[]).map((row) => ({
+    siteId: String(row.site_id),
+    siteName: String(row.site_name),
+    isSimulated: Boolean(row.is_simulated),
+    trades: Number(row.trades),
+    truncatedTrades: Number(row.truncated_trades),
+    grossTotal: Number(row.gross_total),
+    feeTotal: Number(row.fee_total),
+    ownerTotal: Number(row.owner_total),
+  }));
+}

@@ -18,6 +18,8 @@ export type LedgerRow = {
   owner_net_amount: number | string | null;
   attribution_status: string | null;
   payout_status: string | null;
+  /** True when the row came from the commission simulator, not from Deriv. */
+  is_simulated: boolean | null;
   payout_reference: string | null;
   paid_at: string | null;
   traded_at: string | null;
@@ -39,6 +41,7 @@ const SELECT = `
   owner_net_amount,
   attribution_status,
   payout_status,
+  is_simulated,
   payout_reference,
   paid_at,
   traded_at,
@@ -88,19 +91,41 @@ export function useCommissions(options?: {
     const sums = aggregateLedger(rows);
     return {
       ...sums,
-      /** Rows recorded but not yet paid out, in minor units. */
+      /**
+       * Rows recorded but not yet paid out, in minor units.
+       *
+       * Simulated rows are excluded on purpose. They are arithmetic, not money:
+       * counting them here would tell an operator that a tenant is owed funds
+       * that no one ever earned, and the ledger's own checks make them
+       * unpayable anyway. They are surfaced separately below.
+       */
       unpaidOwnerMinor: rows
-        .filter((row) => (row.payout_status ?? "").toLowerCase() !== "paid")
+        .filter(
+          (row) =>
+            row.is_simulated !== true &&
+            (row.payout_status ?? "").toLowerCase() !== "paid",
+        )
         .reduce(
           (total, row) =>
             total + Math.round(Number(row.owner_net_amount ?? 0) * 100),
           0,
         ),
+      /** Simulated owner share, in minor units. Never payable. */
+      simulatedOwnerMinor: rows
+        .filter((row) => row.is_simulated === true)
+        .reduce(
+          (total, row) =>
+            total + Math.round(Number(row.owner_net_amount ?? 0) * 100),
+          0,
+        ),
+      simulatedCount: rows.filter((row) => row.is_simulated === true).length,
       discrepancyMinor: ledgerDiscrepancyMinor(rows),
       paidCount: rows.filter((row) => (row.payout_status ?? "").toLowerCase() === "paid")
         .length,
       pendingCount: rows.filter(
-        (row) => (row.payout_status ?? "").toLowerCase() !== "paid",
+        (row) =>
+          row.is_simulated !== true &&
+          (row.payout_status ?? "").toLowerCase() !== "paid",
       ).length,
     };
   }, [rows]);
