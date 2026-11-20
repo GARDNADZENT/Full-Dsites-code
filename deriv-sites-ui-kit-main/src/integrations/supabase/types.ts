@@ -1022,6 +1022,10 @@ export type Database = {
         }
         Returns: boolean
       }
+      my_platform_access: {
+        Args: Record<PropertyKey, never>
+        Returns: Json
+      }
     }
     Enums: {
       app_role: "admin" | "moderator" | "user"
