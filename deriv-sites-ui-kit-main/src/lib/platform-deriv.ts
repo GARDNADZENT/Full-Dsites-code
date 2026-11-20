@@ -684,6 +684,10 @@ export type CommissionLedgerTotal = {
   siteId: string;
   siteName: string;
   isSimulated: boolean;
+  /** 'demo' rows are real trades on a virtual account: activity, never money owed. */
+  accountType: "demo" | "real";
+  /** 'allocated' means the per-tenant amount is ours, not reported by Deriv. */
+  markupBasis: "deriv_reported" | "allocated" | "computed";
   trades: number;
   truncatedTrades: number;
   grossTotal: number;
@@ -707,6 +711,11 @@ export async function fetchCommissionLedgerTotals(options?: {
     siteId: String(row.site_id),
     siteName: String(row.site_name),
     isSimulated: Boolean(row.is_simulated),
+    accountType: row.account_type === "real" ? "real" : "demo",
+    markupBasis:
+      row.markup_basis === "deriv_reported" || row.markup_basis === "computed"
+        ? row.markup_basis
+        : "allocated",
     trades: Number(row.trades),
     truncatedTrades: Number(row.truncated_trades),
     grossTotal: Number(row.gross_total),

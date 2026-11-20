@@ -10,7 +10,7 @@ import { useAuth } from "@/contexts/AuthContext";
 import { useAdminRole } from "@/hooks/useAdminRole";
 import { useQuery, useQueryClient, useMutation } from "@tanstack/react-query";
 import AdminMarkupStats from "@/components/AdminMarkupStats";
-import CommissionSimulator from "@/components/CommissionSimulator";
+import AdminDemoCommissions from "@/components/AdminDemoCommissions";
 import AdminDerivAppPool from "@/components/AdminDerivAppPool";
 import { AdminTenantDerivApps } from "@/components/AdminTenantDerivApps";
 interface XmlBot {
@@ -75,7 +75,7 @@ interface SupportMessage {
 const Admin = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
-  const { isAdmin, role, canManageSites, canSupport, canViewFinance, loading: adminLoading } = useAdminRole();
+  const { isAdmin, role, canManageSites, canSupport, canViewFinance, loading: adminLoading, error: adminError } = useAdminRole();
   const queryClient = useQueryClient();
   const [activatingId, setActivatingId] = useState<string | null>(null);
   const [expandedSites, setExpandedSites] = useState<Set<string>>(new Set());
@@ -438,6 +438,31 @@ const Admin = () => {
   }
 
   if (!isAdmin) {
+    // A failed permission check is not a denial. Saying "Access Denied" here
+    // hid the real cause (a broken query or an unresolved session) and sent the
+    // user looking for a role they already had.
+    if (adminError) {
+      return (
+        <div className="flex-1 flex items-center justify-center p-8">
+          <div className="text-center max-w-md">
+            <div className="w-16 h-16 rounded-2xl bg-amber-500/20 flex items-center justify-center mx-auto mb-4">
+              <Shield className="w-8 h-8 text-amber-400" />
+            </div>
+            <h1 className="text-xl font-semibold text-foreground mb-2">Could not verify admin access</h1>
+            <p className="text-muted-foreground mb-2">
+              You are signed in{user?.email ? ` as ${user.email}` : ""}, but the permission check did not complete.
+              This is a connection or deployment problem, not a missing role.
+            </p>
+            <p className="text-xs text-muted-foreground/80 mb-4 break-words font-mono">{adminError}</p>
+            <div className="flex gap-2 justify-center">
+              <Button onClick={() => window.location.reload()} variant="outline">Try again</Button>
+              <Button onClick={() => navigate('/dashboard')} variant="outline">Go to Dashboard</Button>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
     return (
       <div className="flex-1 flex items-center justify-center p-8">
         <div className="text-center">
@@ -445,7 +470,10 @@ const Admin = () => {
             <Shield className="w-8 h-8 text-red-400" />
           </div>
           <h1 className="text-xl font-semibold text-foreground mb-2">Access Denied</h1>
-          <p className="text-muted-foreground mb-4">You don't have permission to access this page.</p>
+          <p className="text-muted-foreground mb-1">You don't have permission to access this page.</p>
+          <p className="text-xs text-muted-foreground/70 mb-4">
+            Signed in as {user?.email ?? "unknown"}{role ? ` (role: ${role})` : ""}.
+          </p>
           <Button onClick={() => navigate('/dashboard')} variant="outline">
             Go to Dashboard
           </Button>
@@ -847,7 +875,7 @@ const Admin = () => {
 
         {canViewFinance && <TabsContent value="finance" className="space-y-4">
           <AdminMarkupStats enabled={canViewFinance} />
-          {canViewFinance ? <CommissionSimulator /> : null}
+          {canViewFinance ? <AdminDemoCommissions /> : null}
         </TabsContent>}
 
         {isAdmin && <TabsContent value="deriv-pool">

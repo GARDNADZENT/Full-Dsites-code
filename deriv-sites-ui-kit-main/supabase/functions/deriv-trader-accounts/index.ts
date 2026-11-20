@@ -186,6 +186,17 @@ async function audit(input: {
 // --- _shared/deriv.ts ---
 const DERIV_AUTHORIZATION_URL = 'https://auth.deriv.com/oauth2/auth';
 const DERIV_TOKEN_URL = 'https://auth.deriv.com/oauth2/token';
+/**
+ * Deriv account prefixes that are virtual (demo) accounts.
+ *
+ * Kept in step with _shared/deriv.ts and with the tenant UI's
+ * account-helpers.ts. Accepting only VRTC/VRW mislabelled Deriv's DOT accounts as
+ * real-money accounts, and DOT is demo.
+ */
+const DEMO_ACCOUNT_PREFIXES = ['VRTC', 'VRW', 'DEM', 'DOT'] as const;
+const accountTypeFromId = (accountId: string | null | undefined): 'demo' | 'real' =>
+  !!accountId && DEMO_ACCOUNT_PREFIXES.some(prefix => accountId.toUpperCase().startsWith(prefix)) ? 'demo' : 'real';
+
 const DERIV_API_BASE_URL = 'https://api.derivws.com';
 const KNOWN_SCOPES = ['trade', 'account_manage', 'payment', 'application_read'] as const;
 
@@ -331,7 +342,12 @@ Deno.serve(async req => {
     });
     const data = (Array.isArray(result.data) ? result.data : []).map(account => ({
       account_id: String(account.account_id || ''),
-      account_type: account.account_type === 'real' ? 'real' : 'demo',
+      // Deriv's own answer wins. The id prefix is used only when Deriv omits the
+      // field, so an explicitly-demo account can never be reported as real.
+      account_type:
+        account.account_type === 'real' || account.account_type === 'demo'
+          ? account.account_type
+          : accountTypeFromId(String(account.account_id || '')),
       balance: typeof account.balance === 'number' || typeof account.balance === 'string' ? account.balance : 0,
       currency: typeof account.currency === 'string' ? account.currency : '',
       group: typeof account.group === 'string' ? account.group : '',

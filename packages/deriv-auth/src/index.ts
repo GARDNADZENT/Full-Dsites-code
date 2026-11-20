@@ -83,6 +83,43 @@ export type TraderAccount = {
     account_type: 'demo' | 'real';
 };
 
+export type DemoTradeInput = {
+    accountId: string;
+    symbol?: string;
+    contractType?: string;
+    stake?: number;
+    duration?: number;
+    durationUnit?: string;
+    currency?: string;
+    barrier?: string;
+};
+
+export type DemoTradeResult = {
+    contractId: string;
+    accountId: string;
+    accountType: 'demo';
+    symbol: string;
+    contractType: string;
+    buyPrice: number;
+    payout: number;
+    balanceAfter: number | null;
+    startTime: string | null;
+    /** 'allocated' means the per-tenant amount is ours, not Deriv-reported. */
+    markupBasis: 'allocated';
+    ledger: {
+        recorded: boolean;
+        ledgerId: string | null;
+        siteName: string;
+        grossMarkup: number;
+        platformFee: number;
+        ownerNet: number;
+        markupRate: number;
+        markupBasis: 'allocated';
+        truncatedToZero: boolean;
+        payable: false;
+    };
+};
+
 export class TraderGatewayClient {
     private csrfToken: string | null = null;
 
@@ -134,6 +171,23 @@ export class TraderGatewayClient {
             method: 'POST',
             headers: { 'X-CSRF-Token': this.csrfToken || '' },
             body: JSON.stringify({ accountId }),
+        });
+    }
+
+    /**
+     * Place one real contract on a DEMO account and record it for the tenant.
+     *
+     * The server refuses any account Deriv reports as non-demo, so this cannot be
+     * used to trade real money even by mistake. The response says the per-tenant
+     * markup is 'allocated' rather than Deriv-reported, because both tenants share
+     * one Deriv app and Deriv pays app markup per application.
+     */
+    async placeDemoTrade(input: DemoTradeInput): Promise<{ data: DemoTradeResult; correlationId: string }> {
+        if (!this.csrfToken) await this.session();
+        return this.request('/deriv-demo-trade', {
+            method: 'POST',
+            headers: { 'X-CSRF-Token': this.csrfToken || '' },
+            body: JSON.stringify(input),
         });
     }
 
