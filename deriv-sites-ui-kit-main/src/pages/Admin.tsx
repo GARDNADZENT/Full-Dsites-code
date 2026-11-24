@@ -72,6 +72,33 @@ interface SupportMessage {
   created_at: string;
 }
 
+/**
+ * Sent to /admin without the admin role.
+ *
+ * Says which account was refused — the usual cause of "but I am an admin" is
+ * being signed in as someone else — then puts the visitor back on their own
+ * dashboard. The notice is raised once, after the navigation, so it is not lost
+ * when this component unmounts.
+ */
+const RestrictedRedirect = ({ email }: { email: string | null }) => {
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    toast.error("Admin panel is restricted", {
+      description: email
+        ? `${email} does not have admin access. You have been returned to your dashboard.`
+        : "This account does not have admin access.",
+    });
+    navigate("/dashboard", { replace: true });
+  }, [email, navigate]);
+
+  return (
+    <div className="flex-1 flex items-center justify-center p-8">
+      <p className="text-muted-foreground">Returning you to your dashboard...</p>
+    </div>
+  );
+};
+
 const Admin = () => {
   const navigate = useNavigate();
   const { user } = useAuth();
@@ -438,9 +465,9 @@ const Admin = () => {
   }
 
   if (!isAdmin) {
-    // A failed permission check is not a denial. Saying "Access Denied" here
-    // hid the real cause (a broken query or an unresolved session) and sent the
-    // user looking for a role they already had.
+    // A failed permission check is not a denial, so it still gets an explanation
+    // and a retry rather than a bounce. Bouncing here would hide a deployment or
+    // connection problem behind a shrug.
     if (adminError) {
       return (
         <div className="flex-1 flex items-center justify-center p-8">
@@ -463,23 +490,9 @@ const Admin = () => {
       );
     }
 
-    return (
-      <div className="flex-1 flex items-center justify-center p-8">
-        <div className="text-center">
-          <div className="w-16 h-16 rounded-2xl bg-red-500/20 flex items-center justify-center mx-auto mb-4">
-            <Shield className="w-8 h-8 text-red-400" />
-          </div>
-          <h1 className="text-xl font-semibold text-foreground mb-2">Access Denied</h1>
-          <p className="text-muted-foreground mb-1">You don't have permission to access this page.</p>
-          <p className="text-xs text-muted-foreground/70 mb-4">
-            Signed in as {user?.email ?? "unknown"}{role ? ` (role: ${role})` : ""}.
-          </p>
-          <Button onClick={() => navigate('/dashboard')} variant="outline">
-            Go to Dashboard
-          </Button>
-        </div>
-      </div>
-    );
+    // /admin is closed to everyone except the admin account. Send them back to
+    // their tenant dashboard with a notice instead of leaving a dead page.
+    return <RestrictedRedirect email={user?.email ?? null} />;
   }
 
   const pendingSites = sites?.filter(s => s.status === 'pending' || s.status === 'draft') || [];
