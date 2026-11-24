@@ -1,9 +1,8 @@
 import { useState } from "react";
-import { Menu, Globe, Link2, Rocket, DollarSign, Wallet, Bell, Bot, Headphones, Settings, LogOut, LayoutGrid, Sparkles, Shield } from "lucide-react";
+import { Menu, Globe, Link2, Rocket, DollarSign, Wallet, Bell, Bot, Headphones, Settings, LogOut, LayoutGrid, Sparkles } from "lucide-react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/contexts/AuthContext";
-import { useAdminRole } from "@/hooks/useAdminRole";
 import { useToast } from "@/hooks/use-toast";
 import { Sheet, SheetContent, SheetTrigger } from "@/components/ui/sheet";
 
@@ -12,7 +11,6 @@ interface NavItem {
   label: string;
   path: string;
   notification?: boolean;
-  adminOnly?: boolean;
 }
 
 const navItems: NavItem[] = [
@@ -25,7 +23,6 @@ const navItems: NavItem[] = [
   { icon: Bot, label: "XML Bots", path: "/xml-bots" },
   { icon: Headphones, label: "Support", path: "/support" },
   { icon: Settings, label: "Settings", path: "/settings" },
-  { icon: Shield, label: "Admin", path: "/admin", adminOnly: true },
 ];
 
 const MobileNav = () => {
@@ -33,7 +30,6 @@ const MobileNav = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const { signOut, user } = useAuth();
-  const { isAdmin } = useAdminRole();
   const { toast } = useToast();
 
   const handleSignOut = async () => {
@@ -50,7 +46,7 @@ const MobileNav = () => {
     setOpen(false);
   };
 
-  const filteredNavItems = navItems.filter(item => !item.adminOnly || isAdmin);
+  const filteredNavItems = navItems;
 
   return (
     <div className="lg:hidden fixed top-0 left-0 right-0 z-50 sidebar-bg border-b border-sidebar-border">

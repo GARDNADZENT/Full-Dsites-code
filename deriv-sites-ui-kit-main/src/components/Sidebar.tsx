@@ -11,13 +11,11 @@ import {
   LogOut,
   Sparkles,
   LayoutGrid,
-  Shield,
   Code
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "@/contexts/AuthContext";
-import { useAdminRole } from "@/hooks/useAdminRole";
 import { useToast } from "@/hooks/use-toast";
 
 interface NavItem {
@@ -25,7 +23,6 @@ interface NavItem {
   label: string;
   path: string;
   notification?: boolean;
-  adminOnly?: boolean;
 }
 
 const navItems: NavItem[] = [
@@ -39,14 +36,12 @@ const navItems: NavItem[] = [
   { icon: Code, label: "API Platforms", path: "/api-platforms" },
   { icon: Headphones, label: "Support", path: "/support" },
   { icon: Settings, label: "Settings", path: "/settings" },
-  { icon: Shield, label: "Admin", path: "/admin", adminOnly: true },
 ];
 
 const Sidebar = () => {
   const location = useLocation();
   const navigate = useNavigate();
   const { signOut, user } = useAuth();
-  const { isAdmin } = useAdminRole();
   const { toast } = useToast();
 
   const handleSignOut = async () => {
@@ -58,7 +53,7 @@ const Sidebar = () => {
     navigate('/auth');
   };
 
-  const filteredNavItems = navItems.filter(item => !item.adminOnly || isAdmin);
+  const filteredNavItems = navItems;
 
   return (
     <aside className="hidden lg:flex w-[260px] h-screen sidebar-bg border-r border-sidebar-border flex-col fixed left-0 top-0">
@@ -77,12 +72,6 @@ const Sidebar = () => {
       {user && (
         <div className="px-5 pb-4">
           <p className="text-xs text-muted-foreground truncate">{user.email}</p>
-          {isAdmin && (
-            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-primary/20 text-primary mt-1">
-              <Shield className="w-3 h-3" />
-              Admin
-            </span>
-          )}
         </div>
       )}
 
